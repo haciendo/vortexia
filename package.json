@@ -1,0 +1,26 @@
+{
+  "name": "vortexia",
+  "version": "0.1.0",
+  "description": "Small local MQTT broker for inter-agent communication in the Local Agent Society system",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "vortexia": "./src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js start",
+    "stop": "node src/index.js stop",
+    "status": "node src/index.js status",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "aedes": "^0.51.3",
+    "aedes-server-factory": "^0.2.1",
+    "mqtt": "^5.10.3"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}

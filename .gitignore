@@ -1,0 +1,7 @@
+node_modules/
+*.log
+vortexia.pid
+vortexia.port.json
+.DS_Store
+__pycache__/
+*.pyc
