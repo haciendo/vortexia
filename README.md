@@ -97,6 +97,19 @@ for m in messages:
 Full details, including the JSON message envelope, are in
 [PROTOCOL.md](./PROTOCOL.md).
 
+## Scope-ladder queries
+
+First piece of `docs/future-las-agent-scope-router.md`'s router work: any
+agent can ask another for a description of itself at a given detail level
+(`VortexiaClient.requestScope(name, detail)`), and answer such queries about
+itself (`client.onScopeQuery(handler)`). See PROTOCOL.md's "scope-query /
+scope-reply" section for the message shape.
+
+`scanScopes(dir)` (CLI: `vortexia scope scan <dir>`) reads a directory's
+`.vxia-scope.<N>.md` ladder files plus README into an ordered list per the
+convention in `docs/vxia-scope-ladder.md` — this is the piece a consumer's
+`onScopeQuery` handler would use to answer queries about files on disk.
+
 ## Tests
 
 ```bash

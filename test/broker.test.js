@@ -161,6 +161,144 @@ test('broadcast is NOT retained: a subscriber that connects after a broadcast do
   }
 });
 
+test('scope-query round trip: requester gets the rung the target hands back', async () => {
+  const broker = await startBroker();
+  const asker = new VortexiaClient({ port: broker.mqttPort });
+  const target = new VortexiaClient({ port: broker.mqttPort });
+
+  try {
+    await asker.register('Asker');
+    await target.register('Target');
+
+    target.onScopeQuery((detail) => {
+      if (detail === 'short') return { rung: 55, source: 'short_description', text: 'a small agent' };
+      return { rung: 89, source: 'long_description', text: 'a slightly bigger description' };
+    });
+
+    const shortReply = await asker.requestScope('Target', 'short');
+    assert.deepEqual(shortReply, { rung: 55, source: 'short_description', text: 'a small agent' });
+
+    const fullReply = await asker.requestScope('Target', 'full');
+    assert.deepEqual(fullReply, { rung: 89, source: 'long_description', text: 'a slightly bigger description' });
+  } finally {
+    await asker.close();
+    await target.close();
+    await broker.close();
+  }
+});
+
+test('concurrent scope-queries to the same agent each resolve with their own reply, not the first one back', async () => {
+  const broker = await startBroker();
+  const asker = new VortexiaClient({ port: broker.mqttPort });
+  const target = new VortexiaClient({ port: broker.mqttPort });
+
+  try {
+    await asker.register('Asker3');
+    await target.register('Target3');
+
+    target.onScopeQuery((detail) => {
+      if (detail === 'short') return { rung: 55, source: 'short_description', text: 'short answer' };
+      return { rung: 89, source: 'long_description', text: 'full answer' };
+    });
+
+    const [shortReply, fullReply] = await Promise.all([
+      asker.requestScope('Target3', 'short'),
+      asker.requestScope('Target3', 'full'),
+    ]);
+
+    assert.equal(shortReply.text, 'short answer');
+    assert.equal(fullReply.text, 'full answer');
+  } finally {
+    await asker.close();
+    await target.close();
+    await broker.close();
+  }
+});
+
+test('a late reply arriving after its query already timed out does not resolve a later query', async () => {
+  const broker = await startBroker();
+  const asker = new VortexiaClient({ port: broker.mqttPort });
+  const target = new VortexiaClient({ port: broker.mqttPort });
+
+  try {
+    await asker.register('Asker4');
+    await target.register('Target4');
+
+    // Simulate a slow/late answerer for the first query only.
+    let queries = 0;
+    target.onScopeQuery(async (detail) => {
+      queries += 1;
+      if (queries === 1) await new Promise((r) => setTimeout(r, 150)); // arrives after the 50ms timeout below
+      return { rung: 55, source: 'short_description', text: `answer #${queries}` };
+    });
+
+    await assert.rejects(() => asker.requestScope('Target4', 'short', { timeout: 50 }), /timed out/);
+
+    // A second, fresh query right after must get its own reply, not the
+    // stale late reply to the first (timed-out) one.
+    const reply = await asker.requestScope('Target4', 'short', { timeout: 1000 });
+    assert.equal(reply.text, 'answer #2');
+
+    // Let the first query's still-pending late handler finish and publish
+    // its stale reply before we tear the clients down, so that publish
+    // doesn't race against close() and blow up as an unhandled rejection.
+    await new Promise((r) => setTimeout(r, 200));
+  } finally {
+    await asker.close();
+    await target.close();
+    await broker.close();
+  }
+});
+
+test('onScopeQuery replaces the previous handler instead of stacking a second listener', async () => {
+  const broker = await startBroker();
+  const asker = new VortexiaClient({ port: broker.mqttPort });
+  const target = new VortexiaClient({ port: broker.mqttPort });
+
+  try {
+    await asker.register('Asker5');
+    await target.register('Target5');
+
+    target.onScopeQuery(() => ({ rung: 55, source: 'old', text: 'old handler' }));
+    target.onScopeQuery(() => ({ rung: 55, source: 'new', text: 'new handler' }));
+
+    let replyCount = 0;
+    asker.on('message', (env) => {
+      if (env.kind === 'scope-reply') replyCount += 1;
+    });
+
+    const reply = await asker.requestScope('Target5', 'short');
+    assert.equal(reply.text, 'new handler');
+
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(replyCount, 1, 'only one reply should have been published, not two');
+  } finally {
+    await asker.close();
+    await target.close();
+    await broker.close();
+  }
+});
+
+test('scope-query to an agent with no handler registered times out rather than hanging', async () => {
+  const broker = await startBroker();
+  const asker = new VortexiaClient({ port: broker.mqttPort });
+  const silent = new VortexiaClient({ port: broker.mqttPort });
+
+  try {
+    await asker.register('Asker2');
+    await silent.register('Silent');
+
+    await assert.rejects(
+      () => asker.requestScope('Silent', 'short', { timeout: 200 }),
+      /timed out/,
+    );
+  } finally {
+    await asker.close();
+    await silent.close();
+    await broker.close();
+  }
+});
+
 test('presence LWT fires offline on an abrupt disconnect', async () => {
   const broker = await startBroker();
   const watcher = mqtt.connect(`mqtt://localhost:${broker.mqttPort}`, {

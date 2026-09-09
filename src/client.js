@@ -1,9 +1,20 @@
 import mqtt from 'mqtt';
 import { EventEmitter } from 'node:events';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BROADCAST_TOPIC, SPEAK_TOPIC, inboxTopic, presenceTopic, buildEnvelope } from './topics.js';
+import {
+  BROADCAST_TOPIC,
+  SPEAK_TOPIC,
+  inboxTopic,
+  presenceTopic,
+  buildEnvelope,
+  SCOPE_QUERY_KIND,
+  SCOPE_REPLY_KIND,
+  buildScopeQueryEnvelope,
+  buildScopeReplyEnvelope,
+} from './topics.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PORT_FILE = path.resolve(__dirname, '..', 'vortexia.port.json');
@@ -121,6 +132,92 @@ export class VortexiaClient extends EventEmitter {
     const topic = isBroadcast ? BROADCAST_TOPIC : inboxTopic(toName);
     this.mqttClient.publish(topic, JSON.stringify(envelope), { qos: 1, retain: !isBroadcast });
     return envelope;
+  }
+
+  /**
+   * Ask another agent for its scope-ladder text at a given detail level
+   * ('short' | 'more' | 'full' | {maxChars: N} — meaning is up to the
+   * target's own onScopeQuery handler). Resolves with
+   * `{ rung, source, text }` from that agent's scope-reply, or rejects on
+   * timeout if the target never answers (e.g. it doesn't call
+   * onScopeQuery at all).
+   *
+   * Each call generates its own `queryId` and only resolves on a reply
+   * that echoes it — this is what lets two concurrent requestScope() calls
+   * to the same agent (or a late reply arriving after a prior call already
+   * timed out) each resolve with their own answer instead of the first
+   * reply satisfying whichever promise happened to still be listening.
+   */
+  requestScope(toName, detail = 'short', { timeout = 3000 } = {}) {
+    if (!this.mqttClient) throw new Error('client not registered — call register(name) first');
+    const queryId = crypto.randomUUID();
+    const envelope = buildScopeQueryEnvelope({ from: this.name, to: toName, detail, queryId });
+    const myInbox = inboxTopic(this.name);
+
+    return new Promise((resolve, reject) => {
+      const onMessage = (env, topic) => {
+        if (
+          topic === myInbox &&
+          env.kind === SCOPE_REPLY_KIND &&
+          env.queryId === queryId &&
+          env.from === toName &&
+          env.to === this.name
+        ) {
+          clearTimeout(timer);
+          this.removeListener('message', onMessage);
+          resolve({ rung: env.rung, source: env.scopeSource, text: env.text });
+        }
+      };
+      const timer = setTimeout(() => {
+        this.removeListener('message', onMessage);
+        reject(new Error(`scope query to ${toName} timed out after ${timeout}ms`));
+      }, timeout);
+
+      this.on('message', onMessage);
+      this.mqttClient.publish(inboxTopic(toName), JSON.stringify(envelope), { qos: 1, retain: false });
+    });
+  }
+
+  /**
+   * Register this client as an answerer for incoming scope-query messages.
+   * `handler(detail, envelope)` should return `{ rung, source, text }` (or
+   * a falsy value to decline answering) — how it picks a rung for a given
+   * `detail` is entirely up to the caller (e.g. walking scanScopes()
+   * output, merged with local-agent-society's own name/short_description/
+   * long_description fields). vortexia only carries the request/reply.
+   * `handler` may be async.
+   *
+   * Only one handler is active at a time — calling this again replaces the
+   * previous one rather than stacking a second listener (which would
+   * otherwise publish two replies per query). Returns an unsubscribe
+   * function.
+   */
+  onScopeQuery(handler) {
+    if (!this.mqttClient) throw new Error('client not registered — call register(name) first');
+    if (this._scopeQueryListener) this.removeListener('message', this._scopeQueryListener);
+
+    const myInbox = inboxTopic(this.name);
+    const listener = async (envelope, topic) => {
+      if (topic !== myInbox || envelope.kind !== SCOPE_QUERY_KIND || envelope.to !== this.name) return;
+      const result = await handler(envelope.detail, envelope);
+      if (!result) return;
+      const reply = buildScopeReplyEnvelope({
+        from: this.name,
+        to: envelope.from,
+        queryId: envelope.queryId,
+        rung: result.rung,
+        scopeSource: result.source,
+        text: result.text,
+      });
+      this.mqttClient.publish(inboxTopic(envelope.from), JSON.stringify(reply), { qos: 1, retain: false });
+    };
+
+    this._scopeQueryListener = listener;
+    this.on('message', listener);
+    return () => {
+      this.removeListener('message', listener);
+      if (this._scopeQueryListener === listener) this._scopeQueryListener = null;
+    };
   }
 
   async close() {

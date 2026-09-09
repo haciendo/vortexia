@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startBroker } from './broker.js';
+import { scanScopes } from './scope.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -94,6 +95,30 @@ function cmdStatus() {
   }
 }
 
+function cmdScopeScan(dir) {
+  if (!dir) {
+    console.log('Usage: vortexia scope scan <dir>');
+    process.exit(1);
+  }
+  let result;
+  try {
+    result = scanScopes(path.resolve(dir));
+  } catch (err) {
+    console.error(`vortexia: could not scan '${dir}': ${err.message}`);
+    process.exit(1);
+  }
+  const { rungs, warnings } = result;
+  for (const w of warnings) console.warn(`warning: ${w}`);
+  if (rungs.length === 0) {
+    console.log('No .vxia-scope.*.md files or README found.');
+    return;
+  }
+  for (const r of rungs) {
+    console.log(`\n=== rung ${r.rung} (${r.source}) ===`);
+    console.log(r.text);
+  }
+}
+
 const cmd = process.argv[2];
 
 switch (cmd) {
@@ -106,7 +131,15 @@ switch (cmd) {
   case 'status':
     cmdStatus();
     break;
+  case 'scope':
+    if (process.argv[3] === 'scan') {
+      cmdScopeScan(process.argv[4]);
+    } else {
+      console.log('Usage: vortexia scope scan <dir>');
+      process.exit(1);
+    }
+    break;
   default:
-    console.log('Usage: vortexia <start|stop|status>');
+    console.log('Usage: vortexia <start|stop|status|scope scan <dir>>');
     process.exit(cmd ? 1 : 0);
 }

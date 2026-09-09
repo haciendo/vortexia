@@ -127,3 +127,66 @@ Envelope (same shape as above, plus `kind`, `voice`):
 As of this writing, nothing consumes `las/speak` yet — local-agent-society
 publishes to it, but the Electron widget that would actually speak it is a
 separate, not-yet-built piece of work.
+
+## Extension: scope-ladder query (`scope-query` / `scope-reply`)
+
+Implements section 1 of `docs/future-las-agent-scope-router.md` — asking an
+agent for a description of itself at a given detail level, per the
+`.vxia-scope` ladder protocol (`docs/vxia-scope-ladder.md`). Sent over the
+target's own inbox topic, not a dedicated topic — `kind` distinguishes it
+from a normal chat envelope.
+
+Query:
+
+```json
+{
+  "from": "SomeRouter",
+  "to": "TargetAgent",
+  "source": "agent",
+  "kind": "scope-query",
+  "detail": "short",
+  "queryId": "b3f1...",
+  "ts": 1787958159823
+}
+```
+
+Reply (published to the *requester's* inbox):
+
+```json
+{
+  "from": "TargetAgent",
+  "to": "SomeRouter",
+  "source": "agent",
+  "kind": "scope-reply",
+  "queryId": "b3f1...",
+  "rung": 55,
+  "scopeSource": "short_description",
+  "text": "a small agent",
+  "ts": 1787958159824
+}
+```
+
+- `detail` — `"short"` | `"more"` | `"full"` | `{"maxChars": N}`. Meaning is
+  entirely up to the target's own handler (`VortexiaClient.onScopeQuery`) —
+  vortexia only carries the request/reply, it does not interpret `detail`
+  or walk any ladder itself.
+- `queryId` — generated per call by `VortexiaClient.requestScope()` (a
+  UUID) and echoed back verbatim in the reply. This is what lets two
+  concurrent queries to the same agent, or a reply that arrives after its
+  query already timed out, each resolve the *correct* pending promise
+  instead of the first matching reply satisfying whichever `requestScope()`
+  call happened to still be listening.
+- `rung` / `scopeSource` — which ladder rung the reply came from and where
+  that rung's text came from (e.g. a `.las-agent.json` field name or a
+  `.vxia-scope.<N>.md` filename), so the requester can ask for "a bit more"
+  next time and expect the *next* rung, not the same one again.
+- Neither message is retained — this is a request/reply exchange, not a
+  mailbox. `VortexiaClient.requestScope()` rejects with a timeout error if
+  the target never replies (e.g. it has no `onScopeQuery` handler
+  registered).
+- `scanScopes(dir)` (in `src/scope.js`, CLI: `vortexia scope scan <dir>`)
+  reads a directory's `.vxia-scope.<N>.md` files plus README into an
+  ordered ladder — this is the file-based half of the ladder; combining it
+  with a consumer's own pre-existing fields (like local-agent-society's
+  `.las-agent.json`) to answer an `onScopeQuery` call is that consumer's own
+  business, not vortexia's.
