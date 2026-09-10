@@ -125,9 +125,9 @@ export class VortexiaClient extends EventEmitter {
    * Broadcast is NOT retained — the same "latest value replayed forever"
    * behavior doesn't make sense for a fan-out channel.
    */
-  send(toName, text, { from = this.name, source = 'agent' } = {}) {
+  send(toName, text, { from = this.name, source = 'agent', ...extra } = {}) {
     if (!this.mqttClient) throw new Error('client not registered — call register(name) first');
-    const envelope = buildEnvelope({ from, to: toName, source, text });
+    const envelope = { ...buildEnvelope({ from, to: toName, source, text }), ...extra };
     const isBroadcast = toName === 'broadcast';
     const topic = isBroadcast ? BROADCAST_TOPIC : inboxTopic(toName);
     this.mqttClient.publish(topic, JSON.stringify(envelope), { qos: 1, retain: !isBroadcast });
