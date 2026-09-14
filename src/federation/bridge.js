@@ -10,8 +10,19 @@
 // agent(s).
 
 import { pickTargets } from './router.js';
+import { publishDirectory, mergeDirectories, resolveDirectoryName } from './directory.js';
 
 export const FEDERATION_KIND = 'federation-intent';
+
+// Point-to-point: "deliver to this exact name, wherever it lives" — as
+// opposed to FEDERATION_KIND, which has no named recipient and routes by
+// scope match instead. A local backend (`las agent inject`) that can't
+// find `targetName` in its own local registry publishes one of these to
+// the environment's gateway agent instead of 404ing; the bridge resolves
+// the name (local-first, then federated) and either delivers locally or
+// relays to the owning environment, bypassing pickTargets entirely — an
+// exact name is exact, it doesn't need a semantic match.
+export const FEDERATION_DIRECT_KIND = 'federation-direct';
 
 export class FederationBridge {
   /**
@@ -19,20 +30,30 @@ export class FederationBridge {
    * @param {string} opts.envName - this environment's name (must match a
    *   directory entry's envName for its own agents)
    * @param {import('./relay.js').Relay} opts.relay
-   * @param {Array<{envName: string, agentName: string, scopeText: string}>} opts.directory -
-   *   every known agent across every environment (shared config, same on
-   *   all bridges — see docs/federation-poc.md for how this gets
-   *   distributed in the real cross-machine version)
+   * @param {Array<{envName: string, agentName: string, scopeText: string}>} [opts.directory] -
+   *   a static seed directory (used as-is by tests, and merged with
+   *   whatever syncDirectory() pulls from the relay). Optional if
+   *   opts.envNames is given — the live merge covers the same ground for
+   *   real (N-environment, no hand-maintained array) deployments.
+   * @param {string[]} [opts.envNames] - every environment expected to
+   *   publish its own directory file on the relay (this one included);
+   *   enables syncDirectory()/startDirectorySync() for exact-name
+   *   (FEDERATION_DIRECT_KIND) resolution across N environments.
    * @param {object} [opts.matchOpts] - passed through to pickTargets (minScore, closeness, embedder)
    */
-  constructor({ envName, relay, directory, matchOpts = {} }) {
+  constructor({ envName, relay, directory = [], envNames, matchOpts = {} }) {
     this.envName = envName;
     this.relay = relay;
     this.directory = directory;
+    this.envNames = envNames ?? [envName];
     this.matchOpts = matchOpts;
     this.localClient = null;
     this._pollTimer = null;
+    this._directoryTimer = null;
     this._lastIndex = -1;
+    // What resolveDirectoryName() searches — starts as the static seed,
+    // widened by syncDirectory() once it's run at least once.
+    this._mergedEntries = directory;
   }
 
   outboxFileFor(envName) {
@@ -51,9 +72,12 @@ export class FederationBridge {
   }
 
   async _onLocalMessage(envelope) {
+    if (envelope.kind === FEDERATION_DIRECT_KIND) {
+      return this._onDirectMessage(envelope);
+    }
     if (envelope.kind !== FEDERATION_KIND) return;
 
-    const targets = await pickTargets(envelope.intent, this.directory, this.matchOpts);
+    const targets = await pickTargets(envelope.intent, this._mergedEntries, this.matchOpts);
     const agentNamesByEnv = new Map();
     for (const t of targets) {
       if (!agentNamesByEnv.has(t.envName)) agentNamesByEnv.set(t.envName, []);
@@ -85,6 +109,93 @@ export class FederationBridge {
         routedFrom: routed.routedFrom,
       });
     }
+  }
+
+  /**
+   * Point-to-point delivery for `envelope.to` (bare name or `name@env`),
+   * bypassing pickTargets entirely — an exact name doesn't need a
+   * semantic match. Resolution is local-first (see resolveDirectoryName):
+   * a bare name that also exists locally always means "my local one," the
+   * same way two colleagues named the same thing on different machines
+   * each answer to their own name without confusion. An ambiguous or
+   * unresolvable name gets a reply back to the sender instead of being
+   * silently dropped or guessed at.
+   */
+  async _onDirectMessage(envelope) {
+    const resolved = resolveDirectoryName(envelope.to, this.envName, this._mergedEntries);
+
+    if (resolved.status === 'not-found') {
+      this._replyDirectError(envelope, `no agent named "${envelope.to}" is known in the federation`);
+      return;
+    }
+    if (resolved.status === 'ambiguous') {
+      this._replyDirectError(
+        envelope,
+        `"${envelope.to}" exists in more than one environment — use one of: ${resolved.candidates.join(', ')}`,
+      );
+      return;
+    }
+
+    const routed = {
+      from: envelope.from,
+      text: envelope.text,
+      agentNames: [resolved.agentName],
+      routedFrom: this.envName,
+      ts: Date.now(),
+    };
+    if (resolved.envName === this.envName) {
+      this._deliverLocally(routed);
+    } else {
+      await this.relay.appendMessage(this.outboxFileFor(resolved.envName), routed);
+    }
+  }
+
+  _replyDirectError(envelope, reason) {
+    if (!envelope.from) return;
+    this.localClient.send(envelope.from, reason, {
+      kind: 'federation-direct-error',
+      to: envelope.to,
+    });
+  }
+
+  /** Publish this environment's own agent roster to the relay (see directory.js). */
+  async publishSelf(agents) {
+    await publishDirectory(this.relay, this.envName, agents);
+  }
+
+  /**
+   * Refresh the merged, all-environments directory used by exact-name
+   * resolution (and, for anything not passed a static `directory` seed,
+   * by pickTargets too). Logs — doesn't throw — on a name collision
+   * across environments; resolveDirectoryName is what actually enforces
+   * "never guess" at delivery time.
+   */
+  async syncDirectory() {
+    const { entries, collisions } = await mergeDirectories(this.relay, this.envNames);
+    for (const [name, envs] of collisions) {
+      console.warn(`[federation:${this.envName}] "${name}" exists in multiple environments: ${envs.join(', ')} — exact-name delivery to the bare name will require a name@env qualifier unless one is local`);
+    }
+    // Static seed entries (if any) stay available too, e.g. for tests that
+    // never call publishSelf/syncDirectory against a real relay directory.
+    this._mergedEntries = [...this.directory, ...entries];
+    return { entries: this._mergedEntries, collisions };
+  }
+
+  /** Periodically republish this env's roster and refresh the merged directory. */
+  startDirectorySync(agents, intervalMs = 5000) {
+    const tick = () => {
+      this.publishSelf(agents)
+        .then(() => this.syncDirectory())
+        .catch((err) => console.error(`[federation:${this.envName}] directory sync failed:`, err));
+    };
+    tick();
+    this._directoryTimer = setInterval(tick, intervalMs);
+    return this;
+  }
+
+  stopDirectorySync() {
+    clearInterval(this._directoryTimer);
+    this._directoryTimer = null;
   }
 
   /** Start polling this environment's own file on the relay for incoming federated messages. */

@@ -236,12 +236,24 @@ export class VortexiaClient extends EventEmitter {
     if (!this.mqttClient) return;
     if (this.name) {
       // Clean, deliberate disconnect: publish offline ourselves instead of
-      // relying on the LWT (LWT is for unexpected drops).
-      await new Promise((resolve) => {
-        this.mqttClient.publish(presenceTopic(this.name), 'offline', { qos: 1, retain: true }, () => resolve());
-      });
+      // relying on the LWT (LWT is for unexpected drops). But don't let a
+      // QoS 1 publish that never gets PUBACK'd hang close() forever — if
+      // the broker's own shutdown races ours and kills the socket before
+      // acking (or the connection just drops for any other reason), the
+      // publish callback never fires. A short timeout, or the socket
+      // closing on its own, both mean "move on" here.
+      await Promise.race([
+        new Promise((resolve) => {
+          this.mqttClient.publish(presenceTopic(this.name), 'offline', { qos: 1, retain: true }, () => resolve());
+        }),
+        new Promise((resolve) => this.mqttClient.once('close', resolve)),
+        new Promise((resolve) => setTimeout(resolve, 1000)),
+      ]);
     }
-    await new Promise((resolve) => this.mqttClient.end(false, {}, resolve));
+    await Promise.race([
+      new Promise((resolve) => this.mqttClient.end(false, {}, resolve)),
+      new Promise((resolve) => setTimeout(resolve, 1000)),
+    ]);
   }
 }
 

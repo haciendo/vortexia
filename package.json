@@ -11,7 +11,7 @@
     "start": "node src/index.js start",
     "stop": "node src/index.js stop",
     "status": "node src/index.js status",
-    "test": "node --test --test-concurrency=1"
+    "test": "LAS_REGISTRY_URL=http://127.0.0.1:39217 node --test --test-concurrency=1"
   },
   "dependencies": {
     "aedes": "^0.51.3",

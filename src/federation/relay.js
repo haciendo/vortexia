@@ -15,6 +15,7 @@
  * @typedef {object} Relay
  * @property {(filename: string) => Promise<any[]>} readFile
  * @property {(filename: string, message: any) => Promise<any[]>} appendMessage
+ * @property {(filename: string, data: any) => Promise<any>} writeFile
  */
 
 /** In-memory relay — for deterministic tests with no network dependency. */
@@ -25,7 +26,12 @@ export class InMemoryRelay {
   }
 
   async readFile(filename) {
-    return [...(this.files.get(filename) ?? [])];
+    const value = this.files.get(filename);
+    if (value === undefined) return [];
+    // Mirror GistRelay.readFile: return whatever shape was written
+    // (an append-log array, or an object like a directory snapshot),
+    // not force-cast to an array.
+    return Array.isArray(value) ? [...value] : value;
   }
 
   async appendMessage(filename, message) {
@@ -33,6 +39,14 @@ export class InMemoryRelay {
     arr.push(message);
     this.files.set(filename, arr);
     return arr;
+  }
+
+  // Full-replace write, for single-owner snapshot files (e.g. a per-env
+  // directory roster) rather than an append-only log. Same "exactly one
+  // writer per file" rule as appendMessage sidesteps a race here too.
+  async writeFile(filename, data) {
+    this.files.set(filename, data);
+    return data;
   }
 }
 
@@ -86,5 +100,19 @@ export class GistRelay {
     });
     if (!res.ok) throw new Error(`GistRelay: write failed with ${res.status}`);
     return current;
+  }
+
+  // Full-replace write — no read-modify-write, so no race to sidestep as
+  // long as each file still has exactly one writer (true for a per-env
+  // directory snapshot: only that env ever writes its own file).
+  async writeFile(filename, data) {
+    if (!this.token) throw new Error('GistRelay: writeFile requires a token with the gist scope');
+    const res = await this.fetchImpl(`${this.apiUrl}/gists/${this.gistId}`, {
+      method: 'PATCH',
+      headers: this._headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ files: { [filename]: { content: JSON.stringify(data, null, 2) } } }),
+    });
+    if (!res.ok) throw new Error(`GistRelay: write failed with ${res.status}`);
+    return data;
   }
 }

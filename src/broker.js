@@ -2,7 +2,15 @@ import Aedes from 'aedes';
 import { createServer } from 'aedes-server-factory';
 import { logger } from './logger.js';
 
-const REGISTRY_URL = process.env.LAS_REGISTRY_URL || 'http://localhost:8700';
+// Read lazily (not a frozen module-level const) so a caller — notably a
+// test file — can set process.env.LAS_REGISTRY_URL before startBroker()
+// actually runs and have it take effect, regardless of import order (ESM
+// imports resolve before the importing file's own top-level code runs, so
+// a frozen constant here would already be baked in from the real default
+// by the time a test file's own env-setting statement executes).
+function registryUrl() {
+  return process.env.LAS_REGISTRY_URL || 'http://localhost:8700';
+}
 
 /**
  * Ask the local-agent-society port registry to claim a port.
@@ -19,7 +27,7 @@ export async function claimPort(app, { start, end } = {}) {
     if (start !== undefined) body.start = start;
     if (end !== undefined) body.end = end;
 
-    const res = await fetch(`${REGISTRY_URL}/ports/claim`, {
+    const res = await fetch(`${registryUrl()}/ports/claim`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -48,7 +56,7 @@ export async function releasePort(port, { retries = 2, delayMs = 150 } = {}) {
   if (port == null) return;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(`${REGISTRY_URL}/ports/${port}`, { method: 'DELETE' });
+      const res = await fetch(`${registryUrl()}/ports/${port}`, { method: 'DELETE' });
       if (res.ok || res.status === 404) {
         return;
       }

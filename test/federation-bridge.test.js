@@ -20,8 +20,23 @@ const directory = [
   { envName: 'env-c', agentName: 'Meteo', scopeText: 'clima, tiempo, temperatura, humedad, viento, pronostico' },
 ];
 
+// Pinned, incrementing ports — these tests run several brokers
+// concurrently within one process, so they can't rely on startBroker()'s
+// registry auto-assign (claimPort/releasePort would hit the real,
+// system-wide local-agent-society port registry from every test run,
+// racing and colliding with whatever vortexia instance is actually in
+// production; see the incident this caused on 2026-09-14). Explicit
+// pinned ports skip the registry entirely — see broker.js's
+// pinnedMqttPort/pinnedWsPort short-circuit.
+let nextTestPort = 20100;
+function pinnedPorts() {
+  const mqttPort = nextTestPort++;
+  const wsPort = nextTestPort++;
+  return { mqttPort, wsPort };
+}
+
 async function setupEnv(envName, agentName, relay) {
-  const broker = await startBroker();
+  const broker = await startBroker(pinnedPorts());
   const agentClient = new VortexiaClient({ port: broker.mqttPort });
   await agentClient.register(agentName);
 
