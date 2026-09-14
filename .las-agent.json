@@ -5,6 +5,6 @@
   "pronunciation": "Vortexia",
   "created": "2026-09-09",
   "response_length_hint": 40,
-  "short_description": "",
-  "long_description": ""
+  "short_description": "Local MQTT broker for inter-agent messaging",
+  "long_description": "Owns its repo: bugs, features, incidents. Growing beyond las-agent into general IPC."
 }

@@ -126,11 +126,16 @@ export async function startBroker({ mqttPort: pinnedMqttPort, wsPort: pinnedWsPo
   async function close() {
     if (closed) return;
     closed = true;
+    // aedes.close() first: it walks connected clients and closes each of
+    // their sockets. tcpServer.close()/wsServer.close() only stop accepting
+    // new connections and don't resolve until every existing connection has
+    // ended — calling them before aedes.close() deadlocked shutdown forever
+    // whenever a client (any connected agent) was still attached.
+    await new Promise((resolve) => aedes.close(resolve));
     await Promise.all([
       new Promise((resolve) => tcpServer.close(resolve)),
       new Promise((resolve) => wsServer.close(resolve)),
     ]);
-    await new Promise((resolve) => aedes.close(resolve));
     await Promise.all([releasePort(mqttPort), releasePort(wsPort)]);
   }
 
