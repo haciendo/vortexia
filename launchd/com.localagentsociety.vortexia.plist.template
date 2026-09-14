@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.localagentsociety.vortexia</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>__NODE_BIN__</string>
+		<string>__VORTEXIA_ROOT__/src/index.js</string>
+		<string>start</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>__VORTEXIA_ROOT__</string>
+
+	<!-- Start at login, and restart automatically if the process crashes
+	     (non-zero exit) or is killed. A clean `vortexia stop` exits 0 and is
+	     NOT restarted — use `launchctl kickstart` to bring it back, or
+	     `launchctl bootout` to stop supervising it entirely. -->
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+
+	<!-- Don't crash-loop tighter than once every 10s. -->
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+
+	<!-- launchd survives sleep/wake on its own; nothing extra is needed for
+	     that here. This only catches output emitted before src/logger.js's
+	     own daily-rotating file (logs/vortexia.log) is initialized, plus
+	     anything a hard crash prints past the logger's error handlers. -->
+	<key>StandardOutPath</key>
+	<string>__VORTEXIA_ROOT__/logs/launchd.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__VORTEXIA_ROOT__/logs/launchd.err.log</string>
+</dict>
+</plist>

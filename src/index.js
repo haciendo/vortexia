@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startBroker } from './broker.js';
 import { scanScopes } from './scope.js';
+import { logger } from './logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -49,12 +50,12 @@ async function cmdStart() {
   fs.writeFileSync(PID_FILE, String(process.pid));
   fs.writeFileSync(PORT_FILE, JSON.stringify({ mqttPort, wsPort, pid: process.pid }, null, 2));
 
-  console.log(`vortexia broker started (pid ${process.pid})`);
-  console.log(`  MQTT (TCP):     localhost:${mqttPort}`);
-  console.log(`  MQTT (WebSocket): localhost:${wsPort}`);
+  logger.info(`vortexia broker started (pid ${process.pid})`);
+  logger.info(`  MQTT (TCP):     localhost:${mqttPort}`);
+  logger.info(`  MQTT (WebSocket): localhost:${wsPort}`);
 
   const shutdown = async (signal) => {
-    console.log(`\nvortexia: received ${signal}, shutting down...`);
+    logger.info(`vortexia: received ${signal}, shutting down...`);
     try {
       await close();
     } finally {
@@ -66,6 +67,20 @@ async function cmdStart() {
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  // A restart-on-crash launchd/systemd unit only helps if the process
+  // actually exits on a fatal error instead of hanging in a broken state —
+  // log the cause before going down so the crash shows up in vortexia.log,
+  // not just as a silent gap in uptime.
+  process.on('uncaughtException', (err) => {
+    logger.error(`vortexia: uncaught exception, exiting: ${err.stack || err.message}`);
+    process.exit(1);
+  });
+  process.on('unhandledRejection', (reason) => {
+    const message = reason instanceof Error ? (reason.stack || reason.message) : String(reason);
+    logger.error(`vortexia: unhandled rejection, exiting: ${message}`);
+    process.exit(1);
+  });
 }
 
 function cmdStop() {

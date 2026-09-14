@@ -1,5 +1,6 @@
 import Aedes from 'aedes';
 import { createServer } from 'aedes-server-factory';
+import { logger } from './logger.js';
 
 const REGISTRY_URL = process.env.LAS_REGISTRY_URL || 'http://localhost:8700';
 
@@ -24,13 +25,13 @@ export async function claimPort(app, { start, end } = {}) {
       body: JSON.stringify(body),
     });
     if (!res.ok) {
-      console.warn(`[vortexia] port registry refused claim for ${app}: HTTP ${res.status}`);
+      logger.warn(`[vortexia] port registry refused claim for ${app}: HTTP ${res.status}`);
       return null;
     }
     const data = await res.json();
     return data.port;
   } catch (err) {
-    console.warn(`[vortexia] port registry unreachable (${err.message}) — proceeding without claiming a port for ${app}`);
+    logger.warn(`[vortexia] port registry unreachable (${err.message}) — proceeding without claiming a port for ${app}`);
     return null;
   }
 }
@@ -51,9 +52,9 @@ export async function releasePort(port, { retries = 2, delayMs = 150 } = {}) {
       if (res.ok || res.status === 404) {
         return;
       }
-      console.warn(`[vortexia] failed to release port ${port}: HTTP ${res.status}`);
+      logger.warn(`[vortexia] failed to release port ${port}: HTTP ${res.status}`);
     } catch (err) {
-      console.warn(`[vortexia] port registry unreachable while releasing port ${port} (${err.message})`);
+      logger.warn(`[vortexia] port registry unreachable while releasing port ${port} (${err.message})`);
       return; // registry is down, not a transient race — no point retrying
     }
     if (attempt < retries) {
@@ -80,6 +81,30 @@ export async function startBroker({ mqttPort: pinnedMqttPort, wsPort: pinnedWsPo
 
   const tcpServer = createServer(aedes, { ws: false });
   const wsServer = createServer(aedes, { ws: true });
+
+  // Diagnostics: these are the events that matter when a client (a `las`
+  // CLI call, the widget, another agent's session) reports "connection
+  // refused" or a dropped message — without this, an incident like that
+  // leaves no trace once it's over. Keep it to connection lifecycle and
+  // errors, not per-publish traffic, to avoid drowning the log.
+  aedes.on('client', (client) => {
+    logger.info(`[vortexia] client connected: ${client.id}`);
+  });
+  aedes.on('clientDisconnect', (client) => {
+    logger.info(`[vortexia] client disconnected: ${client.id}`);
+  });
+  aedes.on('clientError', (client, err) => {
+    logger.warn(`[vortexia] client error (${client?.id ?? 'unknown'}): ${err.message}`);
+  });
+  aedes.on('connectionError', (client, err) => {
+    logger.warn(`[vortexia] connection error (${client?.id ?? 'unknown'}): ${err.message}`);
+  });
+  tcpServer.on('error', (err) => {
+    logger.error(`[vortexia] TCP server error: ${err.message}`);
+  });
+  wsServer.on('error', (err) => {
+    logger.error(`[vortexia] WS server error: ${err.message}`);
+  });
 
   await new Promise((resolve, reject) => {
     tcpServer.once('error', reject);

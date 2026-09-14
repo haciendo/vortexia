@@ -106,6 +106,18 @@ export class VortexiaClient extends EventEmitter {
       this.emit('message', envelope, topic);
     });
 
+    // reconnectPeriod is 0 (see above) — this client never retries on its
+    // own. Proxy just 'close' (not 'error' — Node's EventEmitter throws if
+    // an 'error' event has no listener, and most existing callers of this
+    // client don't attach one; 'close' fires on any disconnection,
+    // including after a transport error, so it's the safe single signal)
+    // so a caller that DOES want to recover from a dropped connection
+    // (e.g. the broker restarting under its own crash-restart supervisor)
+    // can tell the difference between "still connected" and "silently
+    // dead" instead of discovering it only when a send/self-test goes
+    // nowhere.
+    this.mqttClient.on('close', () => this.emit('close'));
+
     return this;
   }
 
