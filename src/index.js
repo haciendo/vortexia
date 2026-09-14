@@ -5,6 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { startBroker } from './broker.js';
 import { scanScopes } from './scope.js';
 import { logger } from './logger.js';
+import { VortexiaClient } from './client.js';
+import { FederationBridge } from './federation/bridge.js';
+import { GistRelay } from './federation/relay.js';
+import { discoverLocalRoster } from './federation/localRoster.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -38,6 +42,37 @@ function readPortFile() {
   }
 }
 
+/**
+ * Federation is opt-in: only starts if VORTEXIA_ENV_NAME and
+ * VORTEXIA_GIST_ID are both set. An instance with neither (the common
+ * case — a single-Mac society) runs exactly as before. See
+ * docs/federation-poc.md for how to provision the Gist/token, and
+ * VORTEXIA_FEDERATION_ENV_NAMES (comma-separated) to list every
+ * environment expected to publish to the shared directory — this
+ * environment's own name is added automatically if omitted.
+ */
+async function startFederation(mqttPort) {
+  const envName = process.env.VORTEXIA_ENV_NAME;
+  const gistId = process.env.VORTEXIA_GIST_ID;
+  if (!envName || !gistId) return null;
+
+  const envNames = (process.env.VORTEXIA_FEDERATION_ENV_NAMES || envName)
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  if (!envNames.includes(envName)) envNames.push(envName);
+
+  const relay = new GistRelay({ gistId, token: process.env.VORTEXIA_GIST_TOKEN });
+  const gateway = new VortexiaClient({ port: mqttPort });
+  await gateway.register(`${envName}-gateway`);
+
+  const bridge = new FederationBridge({ envName, relay, envNames }).attach(gateway);
+  const roster = await discoverLocalRoster();
+  bridge.startDirectorySync(roster, 10000);
+  bridge.startPolling(1000);
+
+  logger.info(`[vortexia] federation enabled: env=${envName}, envNames=[${envNames.join(', ')}], local roster=${roster.length} agent(s)`);
+  return { bridge, gateway };
+}
+
 async function cmdStart() {
   const existingPid = readPidFile();
   if (isRunning(existingPid)) {
@@ -54,9 +89,19 @@ async function cmdStart() {
   logger.info(`  MQTT (TCP):     localhost:${mqttPort}`);
   logger.info(`  MQTT (WebSocket): localhost:${wsPort}`);
 
+  const federation = await startFederation(mqttPort).catch((err) => {
+    logger.error(`[vortexia] federation failed to start: ${err.message}`);
+    return null;
+  });
+
   const shutdown = async (signal) => {
     logger.info(`vortexia: received ${signal}, shutting down...`);
     try {
+      if (federation) {
+        federation.bridge.stopPolling();
+        federation.bridge.stopDirectorySync();
+        await federation.gateway.close();
+      }
       await close();
     } finally {
       try { fs.unlinkSync(PID_FILE); } catch {}
