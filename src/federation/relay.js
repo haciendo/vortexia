@@ -158,14 +158,45 @@ const LOG_KIND = 7878;
  * token. Keep it as private as the Gist token was.
  */
 export class NostrRelay {
-  constructor({ secretKey, relays = DEFAULT_NOSTR_RELAYS, queryTimeoutMs = 5000 } = {}) {
+  /**
+   * @param {object} opts
+   * @param {Uint8Array} opts.secretKey - this environment's own signing
+   *   identity (see nostr-tools generateSecretKey()) — never shared
+   *   between environments; each one generates and keeps its own.
+   * @param {Record<string, string>} [opts.knownPeerPubkeys] - hex pubkeys
+   *   of OTHER environments' NostrRelay identities, keyed by whatever
+   *   label is convenient (typically envName) — reads are only trusted
+   *   from this environment's own pubkey plus these. A pubkey is public
+   *   by design (safe to exchange in the open, e.g. via `las agent
+   *   inject`, unlike a Gist token); without it here, this environment
+   *   simply can't read that peer's events — there's no way to
+   *   discover an unknown peer's identity from the relay itself, by
+   *   design (anyone could otherwise claim to be any environment).
+   */
+  constructor({ secretKey, relays = DEFAULT_NOSTR_RELAYS, queryTimeoutMs = 5000, knownPeerPubkeys = {} } = {}) {
     if (!secretKey) throw new Error('NostrRelay requires a secretKey (see nostr-tools generateSecretKey())');
     this.secretKey = secretKey;
     this.relayUrls = relays;
     this.queryTimeoutMs = queryTimeoutMs;
+    this.knownPeerPubkeys = { ...knownPeerPubkeys };
     this._pool = null;
     this._pubkey = null;
     this._ensurePromise = null;
+  }
+
+  /** Learn (or update) a peer environment's pubkey after construction — no restart needed to start trusting a newly-exchanged peer. */
+  addPeer(label, pubkeyHex) {
+    this.knownPeerPubkeys[label] = pubkeyHex;
+  }
+
+  /** This environment's own public key (hex) — safe to share openly for a peer to add via addPeer/knownPeerPubkeys. */
+  async publicKeyHex() {
+    await this._ensure();
+    return this._pubkey;
+  }
+
+  _trustedAuthors() {
+    return [this._pubkey, ...Object.values(this.knownPeerPubkeys)];
   }
 
   // Memoized in-flight promise, not a synchronous null-check: bridge.js
@@ -199,7 +230,7 @@ export class NostrRelay {
     await this._ensure();
     const events = await this._pool.querySync(
       this.relayUrls,
-      { kinds: [SNAPSHOT_KIND, LOG_KIND], authors: [this._pubkey], '#d': [filename] },
+      { kinds: [SNAPSHOT_KIND, LOG_KIND], authors: this._trustedAuthors(), '#d': [filename] },
       { maxWait: this.queryTimeoutMs },
     );
 

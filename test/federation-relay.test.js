@@ -110,3 +110,39 @@ test('NostrRelay: real round trip against live public relays (writeFile + readFi
     relay.close();
   }
 });
+
+test('NostrRelay: reads a known peer\'s events (cross-identity), but not an unknown identity\'s', async (t) => {
+  if (!(await nostrReachable())) {
+    t.skip('no network access to Nostr relays from this environment');
+    return;
+  }
+
+  const { generateSecretKey } = await import('nostr-tools');
+  const suffix = Date.now();
+  const filename = `vortexia-test-peer-${suffix}.json`;
+
+  const peer = new NostrRelay({ secretKey: generateSecretKey(), queryTimeoutMs: 8000 });
+  const stranger = new NostrRelay({ secretKey: generateSecretKey(), queryTimeoutMs: 8000 });
+  const reader = new NostrRelay({ secretKey: generateSecretKey(), queryTimeoutMs: 8000 });
+
+  try {
+    await peer.writeFile(filename, { from: 'peer' });
+    await stranger.writeFile(filename, { from: 'stranger' });
+
+    // Reader doesn't know either yet — its own file is empty (never wrote it).
+    const beforeTrust = await reader.readFile(filename);
+    assert.deepEqual(beforeTrust, []);
+
+    // After exchanging pubkeys with `peer` only, reader can read peer's
+    // event, but a stranger who happens to reuse the same filename is
+    // still invisible — trust is explicit, per environment, not "anyone
+    // who used this tag."
+    reader.addPeer('peer-env', await peer.publicKeyHex());
+    const afterTrust = await reader.readFile(filename);
+    assert.deepEqual(afterTrust, { from: 'peer' });
+  } finally {
+    peer.close();
+    stranger.close();
+    reader.close();
+  }
+});

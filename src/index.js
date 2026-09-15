@@ -7,7 +7,7 @@ import { scanScopes } from './scope.js';
 import { logger } from './logger.js';
 import { VortexiaClient } from './client.js';
 import { FederationBridge } from './federation/bridge.js';
-import { GistRelay } from './federation/relay.js';
+import { GistRelay, NostrRelay, MultiRelay } from './federation/relay.js';
 import { discoverLocalRoster } from './federation/localRoster.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -43,24 +43,54 @@ function readPortFile() {
 }
 
 /**
- * Federation is opt-in: only starts if VORTEXIA_ENV_NAME and
- * VORTEXIA_GIST_ID are both set. An instance with neither (the common
- * case — a single-Mac society) runs exactly as before. See
- * docs/federation-poc.md for how to provision the Gist/token, and
+ * Federation is opt-in: only starts if VORTEXIA_ENV_NAME and at least one
+ * transport is configured (VORTEXIA_GIST_ID and/or
+ * VORTEXIA_NOSTR_SECRET_KEY). An instance with neither (the common case —
+ * a single-Mac society) runs exactly as before. See docs/federation-poc.md
+ * for how to provision a Gist/token or a Nostr key, and
  * VORTEXIA_FEDERATION_ENV_NAMES (comma-separated) to list every
  * environment expected to publish to the shared directory — this
  * environment's own name is added automatically if omitted.
+ *
+ * When more than one transport is configured, they're combined via
+ * MultiRelay (see relay.js): reads race all of them, writes fan out to
+ * all of them, and one transport being down/rate-limited doesn't block
+ * the other. VORTEXIA_NOSTR_SECRET_KEY is hex-encoded (see nostr-tools
+ * generateSecretKey/bytesToHex) — it's this environment's own signing
+ * identity, not a shared secret like the Gist token; losing it only lets
+ * someone impersonate THIS environment's writes.
  */
 async function startFederation(mqttPort) {
   const envName = process.env.VORTEXIA_ENV_NAME;
   const gistId = process.env.VORTEXIA_GIST_ID;
-  if (!envName || !gistId) return null;
+  const nostrSecretHex = process.env.VORTEXIA_NOSTR_SECRET_KEY;
+  if (!envName || (!gistId && !nostrSecretHex)) return null;
 
   const envNames = (process.env.VORTEXIA_FEDERATION_ENV_NAMES || envName)
     .split(',').map((s) => s.trim()).filter(Boolean);
   if (!envNames.includes(envName)) envNames.push(envName);
 
-  const relay = new GistRelay({ gistId, token: process.env.VORTEXIA_GIST_TOKEN });
+  const transports = [];
+  if (gistId) transports.push(new GistRelay({ gistId, token: process.env.VORTEXIA_GIST_TOKEN }));
+  let nostrRelay = null;
+  if (nostrSecretHex) {
+    // VORTEXIA_NOSTR_PEERS: "envName:pubkeyHex,envName2:pubkeyHex2" —
+    // each peer environment's OWN pubkey (public by design, safe to share
+    // in the open), exchanged out of band (e.g. `las agent inject`) since
+    // there's no way to discover an unknown environment's identity from
+    // the relay itself without this — see NostrRelay's doc comment.
+    const knownPeerPubkeys = Object.fromEntries(
+      (process.env.VORTEXIA_NOSTR_PEERS || '')
+        .split(',').map((s) => s.trim()).filter(Boolean)
+        .map((pair) => pair.split(':').map((s) => s.trim())),
+    );
+    nostrRelay = new NostrRelay({ secretKey: Buffer.from(nostrSecretHex, 'hex'), knownPeerPubkeys });
+    transports.push(nostrRelay);
+  }
+  const relay = transports.length > 1 ? new MultiRelay(transports) : transports[0];
+  if (nostrRelay) {
+    logger.info(`[vortexia] Nostr identity pubkey (share this for peers to trust ${envName}): ${await nostrRelay.publicKeyHex()}`);
+  }
   const gateway = new VortexiaClient({ port: mqttPort });
   await gateway.register(`${envName}-gateway`);
 
