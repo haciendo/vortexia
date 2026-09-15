@@ -194,13 +194,18 @@ export class FederationBridge {
     // order.
     const generation = ++this._syncGeneration;
     const { entries, collisions } = await mergeDirectories(this.relay, this.envNames);
-    for (const [name, envs] of collisions) {
-      console.warn(`[federation:${this.envName}] "${name}" exists in multiple environments: ${envs.join(', ')} — exact-name delivery to the bare name will require a name@env qualifier unless one is local`);
-    }
     if (generation !== this._syncGeneration) {
       // A newer syncDirectory() call has since started — its result (once
-      // it lands) is what should win, not this now-stale one.
+      // it lands) is what should win, not this now-stale one. Bail out
+      // BEFORE logging anything about `collisions`/`entries`: warning
+      // about what THIS call saw, when its result is about to be thrown
+      // away, was actively misleading during a live incident — the log
+      // implied _mergedEntries had a collision that, in the case that
+      // actually mattered, it didn't yet.
       return { entries: this._mergedEntries, collisions };
+    }
+    for (const [name, envs] of collisions) {
+      console.warn(`[federation:${this.envName}] "${name}" exists in multiple environments: ${envs.join(', ')} — exact-name delivery to the bare name will require a name@env qualifier unless one is local`);
     }
     // Static seed entries (if any) stay available too, e.g. for tests that
     // never call publishSelf/syncDirectory against a real relay directory.
