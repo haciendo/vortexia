@@ -72,3 +72,40 @@ test('syncDirectory: an earlier-started call resolving LATE with stale data must
     'a late-arriving, earlier-started sync must not clobber a fresher result with stale data',
   );
 });
+
+// A second, related incident on the same day: with Gist 403ing on every
+// call, every outbox poll tick fell through to a real multi-relay Nostr
+// query — and with no overlap guard, a slow query meant the NEXT tick
+// fired before the previous one finished, piling up more and more
+// concurrent in-flight queries against the same relays until they all
+// started timing out. startPolling/startDirectorySync now skip a tick
+// entirely while the previous one is still in flight.
+class SlowRelay {
+  constructor(delayMs) {
+    this.delayMs = delayMs;
+    this.readCalls = 0;
+  }
+  async readFile() {
+    this.readCalls++;
+    await new Promise((r) => setTimeout(r, this.delayMs));
+    return [];
+  }
+  async writeFile() { return {}; }
+  async appendMessage() { return []; }
+}
+
+test('startPolling: a slow relay read must not let poll ticks pile up concurrently', async () => {
+  const relay = new SlowRelay(200); // slower than the 30ms poll interval below
+  const bridge = new FederationBridge({ envName: 'ba-mac', relay, envNames: ['ba-mac'] });
+  bridge.localClient = { send() {} }; // _deliverLocally target; unused here since readFile always returns []
+
+  bridge.startPolling(30);
+  await new Promise((r) => setTimeout(r, 650)); // ~21 ticks' worth of interval time, but reads take 200ms each
+  bridge.stopPolling();
+
+  // Without the guard, ~21 ticks over 650ms would each fire readFile
+  // immediately (interval << read latency), piling up many concurrent
+  // in-flight reads. With it, only one read is ever in flight — roughly
+  // 650/200 ≈ 3 completed, never anywhere near 21.
+  assert.ok(relay.readCalls <= 4, `expected at most ~4 non-overlapping reads in 650ms of 200ms reads, got ${relay.readCalls}`);
+});

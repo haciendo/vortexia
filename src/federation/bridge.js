@@ -230,11 +230,24 @@ export class FederationBridge {
    * 100/hour cap with room for manual/test traffic too); sync every 15s.
    */
   startDirectorySync(agents, { publishIntervalMs = 300000, syncIntervalMs = 15000 } = {}) {
+    // Same overlap guard as startPolling, and for the same reason: a slow
+    // relay round-trip shouldn't let ticks pile up into more and more
+    // concurrent requests against the same relays over time.
+    let publishBusy = false;
+    let syncBusy = false;
     const publishTick = () => {
-      this.publishSelf(agents).catch((err) => console.error(`[federation:${this.envName}] directory publish failed:`, err));
+      if (publishBusy) return;
+      publishBusy = true;
+      this.publishSelf(agents)
+        .catch((err) => console.error(`[federation:${this.envName}] directory publish failed:`, err))
+        .finally(() => { publishBusy = false; });
     };
     const syncTick = () => {
-      this.syncDirectory().catch((err) => console.error(`[federation:${this.envName}] directory sync failed:`, err));
+      if (syncBusy) return;
+      syncBusy = true;
+      this.syncDirectory()
+        .catch((err) => console.error(`[federation:${this.envName}] directory sync failed:`, err))
+        .finally(() => { syncBusy = false; });
     };
     publishTick();
     syncTick();
@@ -252,8 +265,22 @@ export class FederationBridge {
 
   /** Start polling this environment's own file on the relay for incoming federated messages. */
   startPolling(intervalMs = 300) {
+    // Overlap guard: a real relay read can take anywhere from
+    // milliseconds to many seconds (a Gist 403 falling through to a
+    // multi-relay Nostr query especially) — without this, a slow read
+    // means the NEXT tick fires before it finishes, piling up more and
+    // more concurrent in-flight queries against the same relays over
+    // time. Found live: this is very likely why Nostr started timing out
+    // on every relay simultaneously once Gist started 403ing on every
+    // poll tick — every 1s poll fell through to a full 3-relay Nostr
+    // query, and they stacked up faster than they could resolve.
+    let busy = false;
     this._pollTimer = setInterval(() => {
-      this._pollOnce().catch((err) => console.error(`[federation:${this.envName}] poll failed:`, err));
+      if (busy) return;
+      busy = true;
+      this._pollOnce()
+        .catch((err) => console.error(`[federation:${this.envName}] poll failed:`, err))
+        .finally(() => { busy = false; });
     }, intervalMs);
     return this;
   }
