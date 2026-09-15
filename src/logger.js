@@ -5,7 +5,14 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const LOG_DIR = path.join(ROOT, 'logs');
-const LOG_FILE = path.join(LOG_DIR, 'vortexia.log');
+// Overridable so test runs don't interleave into the SAME file the real
+// launchd-managed service writes to — the path is resolved by module
+// location, not by process, so without this every `node --test` run's
+// client-connect/disconnect noise landed in the exact log a human (or
+// another agent) would read to check on the real, production broker,
+// making test fixtures indistinguishable from real traffic. See
+// package.json's "test" script for where this gets set.
+const LOG_FILE = process.env.VORTEXIA_LOG_FILE || path.join(LOG_DIR, 'vortexia.log');
 const RETENTION_DAYS = 7;
 
 function todayStamp(d = new Date()) {

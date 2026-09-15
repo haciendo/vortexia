@@ -55,6 +55,7 @@ export class FederationBridge {
     // What resolveDirectoryName() searches — starts as the static seed,
     // widened by syncDirectory() once it's run at least once.
     this._mergedEntries = directory;
+    this._syncGeneration = 0;
   }
 
   outboxFileFor(envName) {
@@ -95,19 +96,27 @@ export class FederationBridge {
         ts: Date.now(),
       };
       if (envName === this.envName) {
-        this._deliverLocally(routed);
+        // Never left this environment — no relay/transport involved at all.
+        this._deliverLocally({ ...routed, transport: 'local' });
       } else {
         await this.relay.appendMessage(this.outboxFileFor(envName), routed);
       }
     }
   }
 
+  // `routed.transport` — how this message actually reached this agent:
+  // 'local' (never crossed a relay), or the name of whichever relay
+  // served it (see MultiRelay.lastReadVia, set by _pollOnce right before
+  // calling this). Surfaced as message metadata per José's request, so a
+  // human reading the widget (or another agent) can see which channel
+  // carried a given message, not just that it arrived.
   _deliverLocally(routed) {
     for (const agentName of routed.agentNames) {
       this.localClient.send(agentName, routed.text ?? routed.intent, {
         from: routed.from,
         kind: 'federation-delivery',
         routedFrom: routed.routedFrom,
+        transport: routed.transport ?? 'unknown',
       });
     }
   }
@@ -172,9 +181,26 @@ export class FederationBridge {
    * "never guess" at delivery time.
    */
   async syncDirectory() {
+    // Guard against overlapping calls landing out of order: a real relay
+    // read can take anywhere from milliseconds to tens of seconds (Nostr
+    // queries especially), and syncDirectory() runs on a 15s timer — if an
+    // earlier-started call happens to resolve AFTER a later-started one
+    // (slower relay, network hiccup), the "last call to FINISH" naively
+    // overwriting _mergedEntries would clobber fresher data with staler
+    // data. Found live: a collision warning proved a merge briefly had
+    // both environments' entries, but a lookup moments later saw
+    // something else — this generation token makes only the
+    // most-recently-STARTED call's result ever win, regardless of finish
+    // order.
+    const generation = ++this._syncGeneration;
     const { entries, collisions } = await mergeDirectories(this.relay, this.envNames);
     for (const [name, envs] of collisions) {
       console.warn(`[federation:${this.envName}] "${name}" exists in multiple environments: ${envs.join(', ')} — exact-name delivery to the bare name will require a name@env qualifier unless one is local`);
+    }
+    if (generation !== this._syncGeneration) {
+      // A newer syncDirectory() call has since started — its result (once
+      // it lands) is what should win, not this now-stale one.
+      return { entries: this._mergedEntries, collisions };
     }
     // Static seed entries (if any) stay available too, e.g. for tests that
     // never call publishSelf/syncDirectory against a real relay directory.

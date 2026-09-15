@@ -21,6 +21,11 @@
 
 /** In-memory relay — for deterministic tests with no network dependency. */
 export class InMemoryRelay {
+  // Short, stable label for "which transport carried this" message
+  // metadata (see FederationBridge._pollOnce / MultiRelay.lastReadVia) —
+  // every Relay implementation has one, even a fake used only in tests.
+  name = 'memory';
+
   constructor() {
     /** @type {Map<string, any[]>} */
     this.files = new Map();
@@ -59,6 +64,8 @@ export class InMemoryRelay {
  * this for real between two machines.
  */
 export class GistRelay {
+  name = 'gist';
+
   constructor({ gistId, token, apiUrl = 'https://api.github.com', fetchImpl = fetch }) {
     if (!gistId) throw new Error('GistRelay requires a gistId');
     this.gistId = gistId;
@@ -158,6 +165,8 @@ const LOG_KIND = 7878;
  * token. Keep it as private as the Gist token was.
  */
 export class NostrRelay {
+  name = 'nostr';
+
   /**
    * @param {object} opts
    * @param {Uint8Array} opts.secretKey - this environment's own signing
@@ -283,9 +292,19 @@ export class NostrRelay {
  * wasn't first. A write only fails if every relay's write failed.
  */
 export class MultiRelay {
+  name = 'multi';
+
   constructor(relays) {
     if (!relays?.length) throw new Error('MultiRelay requires at least one relay');
     this.relays = relays;
+    // Which underlying relay actually served the MOST RECENT readFile /
+    // writeFile+appendMessage — read immediately after the awaited call by
+    // FederationBridge (no other await happens in between, so nothing else
+    // can overwrite it first) to tag delivered messages with "how this
+    // actually got here" (see docs request: transport as message
+    // metadata). Not meaningful before the first call; null until then.
+    this.lastReadVia = null;
+    this.lastWriteVia = null;
   }
 
   async readFile(filename) {
@@ -303,26 +322,32 @@ export class MultiRelay {
         const result = await relay.readFile(filename);
         sawSuccess = true;
         const isEmpty = Array.isArray(result) ? result.length === 0 : result == null;
-        if (!isEmpty) return result;
+        if (!isEmpty) {
+          this.lastReadVia = relay.name;
+          return result;
+        }
       } catch (err) {
         lastErr = err;
       }
     }
     if (!sawSuccess && lastErr) throw lastErr;
+    this.lastReadVia = sawSuccess ? this.relays.find((r) => r.name)?.name ?? null : null;
     return [];
   }
 
   async appendMessage(filename, message) {
     const results = await Promise.allSettled(this.relays.map((r) => r.appendMessage(filename, message)));
-    const fulfilled = results.find((r) => r.status === 'fulfilled');
-    if (!fulfilled) throw this._aggregateError(results);
-    return fulfilled.value;
+    const index = results.findIndex((r) => r.status === 'fulfilled');
+    if (index === -1) throw this._aggregateError(results);
+    this.lastWriteVia = this.relays[index].name;
+    return results[index].value;
   }
 
   async writeFile(filename, data) {
     const results = await Promise.allSettled(this.relays.map((r) => r.writeFile(filename, data)));
-    const fulfilled = results.find((r) => r.status === 'fulfilled');
-    if (!fulfilled) throw this._aggregateError(results);
+    const index = results.findIndex((r) => r.status === 'fulfilled');
+    if (index === -1) throw this._aggregateError(results);
+    this.lastWriteVia = this.relays[index].name;
     return data;
   }
 
