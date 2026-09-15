@@ -2,6 +2,28 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { InMemoryRelay, MultiRelay, NostrRelay } from '../src/federation/relay.js';
 
+test('NostrRelay.readFile: picks the NEWEST snapshot event by created_at, not the first one returned', async () => {
+  // No real network: initialize the pool, then swap in a stub querySync
+  // that returns two "replaceable" events for the same filename out of
+  // order — deterministic reproduction of what real relays disagreeing on
+  // propagation looks like from querySync's point of view. Found live: a
+  // directory snapshot kept reading back stale/empty long after a real,
+  // non-empty publish had gone out, because .find() took whichever came
+  // back first in the array, not the latest by timestamp.
+  const relay = new NostrRelay({ secretKey: new Uint8Array(32).fill(7) });
+  await relay._ensure();
+  const pubkey = await relay.publicKeyHex();
+
+  relay._pool.querySync = async () => [
+    { kind: 30078, created_at: 1000, tags: [['d', 'directory-ba-mac.json']], content: JSON.stringify({ envName: 'ba-mac', agents: [] }), pubkey },
+    { kind: 30078, created_at: 2000, tags: [['d', 'directory-ba-mac.json']], content: JSON.stringify({ envName: 'ba-mac', agents: [{ agentName: 'System', scopeText: 'x' }] }), pubkey },
+  ];
+
+  const result = await relay.readFile('directory-ba-mac.json');
+  assert.deepEqual(result, { envName: 'ba-mac', agents: [{ agentName: 'System', scopeText: 'x' }] });
+  relay.close();
+});
+
 // A relay double that always rejects, to prove fallback actually engages
 // rather than just happening to work because the first relay in the list
 // is the real one.

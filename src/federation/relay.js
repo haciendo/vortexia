@@ -243,8 +243,16 @@ export class NostrRelay {
       { maxWait: this.queryTimeoutMs },
     );
 
-    const snapshot = events.find((e) => e.kind === SNAPSHOT_KIND);
-    if (snapshot) return JSON.parse(snapshot.content);
+    // querySync fans out across every configured relay and merges whatever
+    // each one has — public relays don't all converge to the latest
+    // replacement instantly, so more than one (differently stale) copy of
+    // a "replaceable" event can legitimately come back at once. Picking
+    // the FIRST one found (array order, not recency) risked silently
+    // serving a relay's stale cached copy instead of the actual latest
+    // write — found live: a directory snapshot kept reading back empty
+    // long after a real, non-empty publish had gone out.
+    const snapshots = events.filter((e) => e.kind === SNAPSHOT_KIND).sort((a, b) => b.created_at - a.created_at);
+    if (snapshots[0]) return JSON.parse(snapshots[0].content);
 
     return events
       .filter((e) => e.kind === LOG_KIND)
