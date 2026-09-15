@@ -309,23 +309,32 @@
   </nav>
 
   <header class="hero">
-    <div class="eyebrow"><span class="dot"></span>vortexia · vortex-relay · v1</div>
-    <h1>Dos brokers, un relay, sin línea directa</h1>
+    <div class="eyebrow"><span class="dot"></span>vortexia · vortex-relay · v1 + transporte directo</div>
+    <h1>Un relay por defecto, una línea directa cuando existe</h1>
     <p class="lede">
       Cada Mac de la sociedad corre su propio broker MQTT <code>vortexia</code>, local.
-      Los agentes solo hablan con <em>su propio</em> broker — lo único que cruza entre
-      máquinas son archivos JSON chicos, escritos y leídos a través de un relay en el
-      que ninguna de las dos Macs confía para alcanzar a la otra directamente.
+      Los agentes solo hablan con <em>su propio</em> broker. Lo que cruza entre
+      máquinas se decide por entorno destino: un <strong>relay</strong> compartido,
+      de tipo store-and-forward (archivos JSON chicos en Gist/Nostr), siempre
+      funciona pero es lento; un <strong>transporte directo</strong> en vivo (hoy: misma
+      LAN, encontrado por mDNS) se salta el relay por completo cuando hay uno
+      conectado. Cualquiera de los dos se puede fijar (pin) — el relay es un
+      medio entre varios, no el único camino.
     </p>
   </header>
 
   <section>
     <h2>01 · Topología</h2>
-    <h3>Broker local, puente vortex-relay, relay compartido</h3>
+    <h3>Broker local, puente vortex-relay, relay o transporte directo</h3>
     <p class="dim">
-      <code>ba-mac</code> y <code>uy-mac</code> nunca abren un socket entre sí.
-      Un <strong>VortexRelayBridge</strong> de cada lado es lo único que lee o escribe
-      el relay — los agentes locales no tienen idea de que vortex-relay existe.
+      Los agentes locales nunca saben que vortex-relay existe — cada uno solo
+      habla con <em>su propio</em> broker. El <strong>VortexRelayBridge</strong> de su
+      entorno (el cliente <code>&lt;env&gt;-gateway</code>) es lo único que sale hacia
+      afuera, y tiene una elección por cada entorno par: escribir en el relay
+      compartido de abajo (funciona para cualquier par, en cualquier lugar,
+      lento), o — cuando hay un <code>DirectTransport</code> conectado para ese par,
+      p. ej. descubierto en la misma LAN — publicar directo en el broker del par,
+      sin relay de por medio.
     </p>
     <figure>
       <div class="diagram-frame">
@@ -385,6 +394,10 @@
 
           <line x1="509" y1="192" x2="509" y2="216" stroke="currentColor" stroke-opacity="0.6" marker-end="url(#arrow-es)"/>
 
+          <line x1="224" y1="230" x2="414" y2="230" stroke="var(--violet)" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arrow-es)"/>
+          <line x1="414" y1="242" x2="224" y2="242" stroke="var(--violet)" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arrow-es)"/>
+          <text x="319" y="212" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="var(--violet)">DirectTransport — cuando está conectado</text>
+
           <rect x="180" y="324" width="360" height="60" rx="10" fill="var(--surface-2)" stroke="currentColor" stroke-opacity="0.4"/>
           <text x="360" y="348" text-anchor="middle" font-family="IBM Plex Mono" font-size="12" fill="currentColor" font-weight="600">MultiRelay</text>
           <text x="360" y="365" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="currentColor" fill-opacity="0.65">GitHub Gist  +  relays Nostr</text>
@@ -399,14 +412,115 @@
       </div>
       <figcaption>
         La entrega local (arriba) nunca sale del broker: <code>agent.send()</code> publica
-        MQTT retenido, sin relay de por medio. Solo el cliente <code>&lt;env&gt;-gateway</code>
-        de cada lado — el VortexRelayBridge — lee y escribe el relay compartido de abajo.
+        MQTT retenido, sin relay de por medio. El cliente <code>&lt;env&gt;-gateway</code>
+        de cada lado — el VortexRelayBridge — lee y escribe el relay compartido de abajo
+        por defecto, pero prefiere la línea directa punteada de arriba cuando hay una
+        conectada para ese par — ver la próxima sección para cómo se toma esa decisión.
       </figcaption>
     </figure>
   </section>
 
   <section>
-    <h2>02 · Identificación</h2>
+    <h2>02 · Conexiones</h2>
+    <h3>Un paraguas, varios medios, ordenados por costo</h3>
+    <p class="dim">
+      <strong>Connection</strong> es el paraguas: mismo-máquina, un enlace directo en vivo,
+      y el relay/lago son tres implementaciones de una interfaz chica —
+      <code>name</code> / <code>priority</code> / <code>isAvailable()</code> /
+      <code>deliver(envName, routed)</code>. El relay (Gist, Nostr, y el propio fallback
+      de <code>MultiRelay</code> entre ambos) es <strong>una</strong> Connection, no el
+      sistema — es la opción siempre alcanzable, siempre la más lenta, la que se
+      intenta al final. <code>ConnectionRouter</code> ordena las Connections que aplican
+      a un entorno par por <code>priority</code> (la más barata/rápida primero) y las
+      intenta en orden, cayendo al siguiente medio si falla — la misma forma de
+      circuit breaker que ya usaba <code>MultiRelay</code> entre Gist/Nostr, generalizada
+      un nivel más arriba para que funcione entre <em>tipos</em> de conexión, no solo
+      dentro del tipo relay.
+    </p>
+
+    <div class="cardrow">
+      <div class="entity" style="flex:1 1 200px; border-top-color: var(--ok);">
+        <div class="kicker" style="color: var(--ok);">LocalConnection · 0</div>
+        <h4>Misma máquina</h4>
+        <ul>
+          <li><span class="k">cuándo</span> envName === this.envName</li>
+          <li><span class="k">costo</span> ninguno — una llamada en el mismo proceso</li>
+        </ul>
+      </div>
+      <div class="entity domain" style="flex:1 1 200px;">
+        <div class="kicker">DirectConnection · 10</div>
+        <h4>Un enlace en vivo — hoy, LAN</h4>
+        <ul>
+          <li><span class="k">cuándo</span> hay un DirectTransport conectado para ese par</li>
+          <li><span class="k">hoy</span> DirectMqttTransport, encontrado por mDNS</li>
+        </ul>
+      </div>
+      <div class="entity" style="flex:1 1 200px;">
+        <div class="kicker">RelayConnection · 100</div>
+        <h4>El lago — siempre está</h4>
+        <ul>
+          <li><span class="k">cuándo</span> siempre — el fallback garantizado</li>
+          <li><span class="k">hoy</span> envuelve MultiRelay (Gist + Nostr)</li>
+        </ul>
+      </div>
+    </div>
+
+    <figure>
+      <div class="diagram-frame">
+        <svg viewBox="0 0 720 250" role="img" aria-label="ConnectionRouter.deliver ordena las Connections que aplican a un entorno par por prioridad, intenta primero la de prioridad más baja disponible, y cae a la siguiente si falla. Un pin fija una Connection nombrada, sin fallback — lanza error de inmediato, registrado, en vez de cruzar un medio no elegido.">
+          <defs>
+            <marker id="arrow4-es" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor" />
+            </marker>
+          </defs>
+
+          <rect x="20" y="16" width="160" height="40" rx="8" fill="var(--ok-soft)" stroke="var(--ok)" stroke-width="1.4"/>
+          <text x="100" y="40" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="currentColor">local · prioridad 0</text>
+
+          <rect x="220" y="16" width="160" height="40" rx="8" fill="var(--violet-soft)" stroke="var(--violet)" stroke-width="1.4"/>
+          <text x="300" y="40" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="currentColor">lan-direct · prioridad 10</text>
+
+          <rect x="420" y="16" width="160" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.4"/>
+          <text x="500" y="40" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="currentColor">relay · prioridad 100</text>
+
+          <text x="640" y="40" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="currentColor" fill-opacity="0.55">…tipos futuros</text>
+
+          <line x1="100" y1="56" x2="360" y2="110" stroke="currentColor" stroke-opacity="0.4" stroke-dasharray="3 3"/>
+          <line x1="300" y1="56" x2="360" y2="110" stroke="currentColor" stroke-opacity="0.6" marker-end="url(#arrow4-es)"/>
+          <line x1="500" y1="56" x2="360" y2="110" stroke="currentColor" stroke-opacity="0.4" stroke-dasharray="3 3"/>
+          <text x="360" y="90" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="currentColor" fill-opacity="0.6">ordenadas por prioridad, se intentan en orden</text>
+
+          <rect x="230" y="110" width="260" height="42" rx="8" fill="var(--surface-2)" stroke="currentColor" stroke-opacity="0.5"/>
+          <text x="360" y="132" text-anchor="middle" font-family="IBM Plex Mono" font-size="11" fill="currentColor">ConnectionRouter.deliver()</text>
+          <text x="360" y="145" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="currentColor" fill-opacity="0.6">no disponible o circuito abierto → se salta</text>
+
+          <line x1="290" y1="152" x2="180" y2="200" stroke="currentColor" stroke-opacity="0.6" marker-end="url(#arrow4-es)"/>
+          <text x="180" y="182" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="currentColor" fill-opacity="0.65">lanza error → prueba la siguiente</text>
+
+          <line x1="430" y1="152" x2="540" y2="200" stroke="currentColor" stroke-opacity="0.6" marker-end="url(#arrow4-es)"/>
+          <text x="540" y="182" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="currentColor" fill-opacity="0.65">tiene éxito → listo</text>
+
+          <rect x="60" y="200" width="220" height="36" rx="8" fill="none" stroke="currentColor" stroke-opacity="0.5"/>
+          <text x="170" y="222" text-anchor="middle" font-family="IBM Plex Mono" font-size="9.5" fill="currentColor">fijada (pin): lanza error de inmediato, sin fallback</text>
+
+          <rect x="440" y="200" width="220" height="36" rx="8" fill="var(--ok-soft)" stroke="var(--ok)" stroke-opacity="0.6"/>
+          <text x="550" y="222" text-anchor="middle" font-family="IBM Plex Mono" font-size="9.5" fill="currentColor">entregado — etiqueta de transporte fijada</text>
+        </svg>
+      </div>
+      <figcaption>
+        Por defecto (<code>transportPins[envName]</code> sin definir) es automático: la
+        Connection disponible más barata/rápida primero, cayendo por la lista ordenada
+        por prioridad si falla. <code>transportPins[envName] = "&lt;nombre&gt;"</code> fija
+        ese par a exactamente una Connection nombrada ("relay", el nombre propio de un
+        DirectTransport, o cualquier tipo futuro) — sin fallback alguno, así que un
+        mensaje sin dónde ir por ese único medio se descarta y se registra, en vez de
+        cruzar silenciosamente un medio que José no eligió para él.
+      </figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>03 · Identificación</h2>
     <h3>Dos entidades, dos estructuras</h3>
     <p class="dim">
       Un agente se identifica de dos formas independientes, cada una respondiendo
@@ -482,7 +596,7 @@
   </section>
 
   <section>
-    <h2>03 · Ruteo</h2>
+    <h2>04 · Ruteo</h2>
     <h3>La dirección decide el camino</h3>
     <div class="tablewrap">
       <table>
@@ -511,7 +625,7 @@
   </section>
 
   <section>
-    <h2>04 · Directorio</h2>
+    <h2>05 · Directorio</h2>
     <h3>Construido a partir de lo que cada entorno dice de sí mismo</h3>
     <p class="dim">
       No hay un registro central. Cada entorno publica periódicamente las dos
@@ -536,7 +650,7 @@
   </section>
 
   <section>
-    <h2>05 · Referencia de sobre (envelope)</h2>
+    <h2>06 · Referencia de sobre (envelope)</h2>
     <h3>Lo que efectivamente cruza el cable</h3>
     <dl class="kv">
       <dt>tópico</dt><dd>las/agent/&lt;name&gt;/inbox</dd>
@@ -546,11 +660,12 @@
       <dt>entrada de directorio</dt><dd>{ envName, agentName, scopeText }</dd>
       <dt>archivo de directorio</dt><dd>directory-&lt;env&gt;.json → { envName, agents: [{ agentName, scopeText }], updatedAt }</dd>
       <dt>archivo de outbox</dt><dd>inbox-&lt;env&gt;.json → agrega { from, text, agentNames, routedFrom, ts }</dd>
+      <dt>etiqueta de transporte</dt><dd>campo <code>transport</code> de la entrega: "local" · nombre del relay ("gist", "nostr", "multi") · nombre del DirectTransport ("lan-direct")</dd>
     </dl>
   </section>
 
   <footer>
-    vortexia · ~/Development/vortexia · módulo vortex-relay, primera implementación
+    vortexia · ~/Development/vortexia · módulo vortex-relay — relay (Gist/Nostr) + transporte directo LAN
   </footer>
 
 </div>

@@ -9,6 +9,7 @@ import { VortexiaClient } from './client.js';
 import { VortexRelayBridge } from './vortex-relay/bridge.js';
 import { GistRelay, NostrRelay, MultiRelay } from './vortex-relay/relay.js';
 import { discoverLocalRoster } from './vortex-relay/localRoster.js';
+import { LanDiscovery } from './vortex-relay/lanDiscovery.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -60,7 +61,30 @@ function readPortFile() {
  * identity, not a shared secret like the Gist token; losing it only lets
  * someone impersonate THIS environment's writes.
  */
-async function startVortexRelay(mqttPort) {
+/**
+ * Opt-out (VORTEXIA_LAN_DISCOVERY=0), not opt-in: a failure anywhere here
+ * — mDNS unsupported, macOS Local Network permission denied, an isolated
+ * router — must never take down vortex-relay itself, only mean this
+ * environment falls back to relay-only for peers it can't reach directly.
+ * ConnectionRouter already treats "no direct connection attached" as a
+ * normal case (ranks relay next), so the failure mode here is exactly
+ * that, not a crash.
+ */
+async function startLanDiscovery(bridge, { envName, mqttPort, wsPort }) {
+  if (process.env.VORTEXIA_LAN_DISCOVERY === '0') return null;
+  const lan = new LanDiscovery({ envName, mqttPort, wsPort });
+  try {
+    await lan.advertise();
+  } catch (err) {
+    logger.warn(`[vortexia] LAN discovery unavailable (${err.message}) — peers on this LAN will go through the relay instead of a direct connection`);
+    return null;
+  }
+  bridge.attachLanDiscovery(lan);
+  logger.info(`[vortexia] LAN direct-connection discovery enabled (mDNS) for env=${envName}`);
+  return lan;
+}
+
+async function startVortexRelay(mqttPort, wsPort) {
   const envName = process.env.VORTEXIA_ENV_NAME;
   const gistId = process.env.VORTEXIA_GIST_ID;
   const nostrSecretHex = process.env.VORTEXIA_NOSTR_SECRET_KEY;
@@ -102,9 +126,10 @@ async function startVortexRelay(mqttPort) {
   // (a read) doesn't share that budget and can run far more often.
   bridge.startDirectorySync(roster, { publishIntervalMs: 300000, syncIntervalMs: 15000 });
   bridge.startPolling(1000);
+  const lan = await startLanDiscovery(bridge, { envName, mqttPort, wsPort });
 
   logger.info(`[vortexia] vortex-relay enabled: env=${envName}, envNames=[${envNames.join(', ')}], local roster=${roster.length} agent(s)`);
-  return { bridge, gateway };
+  return { bridge, gateway, lan };
 }
 
 async function cmdStart() {
@@ -123,7 +148,7 @@ async function cmdStart() {
   logger.info(`  MQTT (TCP):     localhost:${mqttPort}`);
   logger.info(`  MQTT (WebSocket): localhost:${wsPort}`);
 
-  const vortexRelay = await startVortexRelay(mqttPort).catch((err) => {
+  const vortexRelay = await startVortexRelay(mqttPort, wsPort).catch((err) => {
     logger.error(`[vortexia] vortex-relay failed to start: ${err.message}`);
     return null;
   });
@@ -134,6 +159,7 @@ async function cmdStart() {
       if (vortexRelay) {
         vortexRelay.bridge.stopPolling();
         vortexRelay.bridge.stopDirectorySync();
+        vortexRelay.lan?.stop();
         await vortexRelay.gateway.close();
       }
       await close();

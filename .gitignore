@@ -6,3 +6,4 @@ vortexia.port.json
 .DS_Store
 __pycache__/
 *.pyc
+HANDOFF.md

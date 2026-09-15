@@ -11,6 +11,8 @@
 
 import { pickTargets } from './router.js';
 import { publishDirectory, mergeDirectories, resolveDirectoryName } from './directory.js';
+import { DirectMqttTransport } from './directTransport.js';
+import { ConnectionRouter, LocalConnection, DirectConnection, RelayConnection } from './connection.js';
 
 export const VORTEX_RELAY_KIND = 'vortex-relay-intent';
 
@@ -40,13 +42,21 @@ export class VortexRelayBridge {
    *   enables syncDirectory()/startDirectorySync() for exact-name
    *   (VORTEX_RELAY_DIRECT_KIND) resolution across N environments.
    * @param {object} [opts.matchOpts] - passed through to pickTargets (minScore, closeness, embedder)
+   * @param {Record<string, string>} [opts.transportPins] -
+   *   per-envName lock to one Connection by name ("relay", a
+   *   DirectTransport's own name like "lan-direct", or any future
+   *   connection kind) — no fallback, that peer only ever uses this one
+   *   medium. Unlisted envNames get the auto default: cheapest/fastest
+   *   available Connection first, falling back down the list on failure
+   *   (see connection.js/ConnectionRouter).
    */
-  constructor({ envName, relay, directory = [], envNames, matchOpts = {} }) {
+  constructor({ envName, relay, directory = [], envNames, matchOpts = {}, transportPins = {} }) {
     this.envName = envName;
     this.relay = relay;
     this.directory = directory;
     this.envNames = envNames ?? [envName];
     this.matchOpts = matchOpts;
+    this.transportPins = transportPins;
     this.localClient = null;
     this._pollTimer = null;
     this._directoryTimer = null;
@@ -56,6 +66,64 @@ export class VortexRelayBridge {
     // widened by syncDirectory() once it's run at least once.
     this._mergedEntries = directory;
     this._syncGeneration = 0;
+    // Live DirectTransport per peer envName — see directTransport.js.
+    // Populated by attachDirectTransport() (directly, or via
+    // attachLanDiscovery() reacting to peers coming up/down).
+    this._directTransports = new Map();
+    this._router = new ConnectionRouter();
+    // this.relay is read live (via the arrow below), not snapshotted —
+    // see RelayConnection's relayRef doc: a caller may reassign
+    // bridge.relay after construction (tests do, to simulate a relay
+    // going flaky mid-run) and delivery must see that swap.
+    this._relayConnection = new RelayConnection(() => this.relay, { outboxFileFor: (env) => this.outboxFileFor(env) });
+    this._localConnection = new LocalConnection((routed) => this._deliverLocally(routed));
+  }
+
+  /** Candidate Connections for `envName`, cheapest/fastest first is handled by the router — this just filters to what applies. */
+  _connectionsFor(envName) {
+    if (envName === this.envName) return [this._localConnection];
+    const connections = [];
+    const direct = this._directTransports.get(envName);
+    if (direct) connections.push(new DirectConnection(direct));
+    connections.push(this._relayConnection);
+    return connections;
+  }
+
+  /** Register a live DirectTransport for `envName` and connect it. */
+  async attachDirectTransport(envName, transport) {
+    await this.detachDirectTransport(envName);
+    this._directTransports.set(envName, transport);
+    await transport.connect();
+    return transport;
+  }
+
+  async detachDirectTransport(envName) {
+    const existing = this._directTransports.get(envName);
+    if (!existing) return;
+    this._directTransports.delete(envName);
+    await existing.disconnect();
+  }
+
+  /**
+   * Wire a LanDiscovery instance's peer-up/peer-down events to
+   * attach/detach a DirectMqttTransport automatically — the "direct LAN
+   * connection" medium José asked for, requiring no manual config once
+   * mDNS finds a peer. `ClientImpl` is test-injectable (see
+   * DirectMqttTransport).
+   */
+  attachLanDiscovery(lanDiscovery, { ClientImpl } = {}) {
+    lanDiscovery.discover({
+      onUp: (peer) => {
+        this.attachDirectTransport(
+          peer.envName,
+          new DirectMqttTransport({ envName: peer.envName, host: peer.host, mqttPort: peer.mqttPort, ...(ClientImpl ? { ClientImpl } : {}) }),
+        ).catch((err) => console.error(`[vortex-relay:${this.envName}] direct transport to ${peer.envName} failed to connect:`, err));
+      },
+      onDown: (envName) => {
+        this.detachDirectTransport(envName).catch((err) => console.error(`[vortex-relay:${this.envName}] direct transport to ${envName} failed to disconnect cleanly:`, err));
+      },
+    });
+    return this;
   }
 
   outboxFileFor(envName) {
@@ -95,13 +163,18 @@ export class VortexRelayBridge {
         routedFrom: this.envName,
         ts: Date.now(),
       };
-      if (envName === this.envName) {
-        // Never left this environment — no relay/transport involved at all.
-        this._deliverLocally({ ...routed, transport: 'local' });
-      } else {
-        await this.relay.appendMessage(this.outboxFileFor(envName), routed);
-      }
+      await this._deliverToEnv(envName, routed);
     }
+  }
+
+  /**
+   * Send `routed` to `envName` via whichever Connection applies — local,
+   * a live DirectTransport, or the relay/lake — picked by ConnectionRouter
+   * (cheapest/fastest available, falling back on failure), or pinned via
+   * transportPins[envName] (see connection.js and the constructor doc).
+   */
+  async _deliverToEnv(envName, routed) {
+    await this._router.deliver(envName, routed, this._connectionsFor(envName), { pin: this.transportPins[envName] });
   }
 
   // `routed.transport` — how this message actually reached this agent:
@@ -153,11 +226,7 @@ export class VortexRelayBridge {
       routedFrom: this.envName,
       ts: Date.now(),
     };
-    if (resolved.envName === this.envName) {
-      this._deliverLocally(routed);
-    } else {
-      await this.relay.appendMessage(this.outboxFileFor(resolved.envName), routed);
-    }
+    await this._deliverToEnv(resolved.envName, routed);
   }
 
   _replyDirectError(envelope, reason) {
