@@ -165,13 +165,26 @@ export class NostrRelay {
     this.queryTimeoutMs = queryTimeoutMs;
     this._pool = null;
     this._pubkey = null;
+    this._ensurePromise = null;
   }
 
+  // Memoized in-flight promise, not a synchronous null-check: bridge.js
+  // fires publish and sync on independent timers (see
+  // FederationBridge.startDirectorySync), so two calls into a fresh
+  // NostrRelay can easily land before the first `await import(...)`
+  // resolves — a bare `if (this._pool) return` lets both proceed, each
+  // creating and assigning its own SimplePool, the second silently
+  // orphaning the first.
   async _ensure() {
     if (this._pool) return;
-    const { SimplePool, getPublicKey } = await import('nostr-tools');
-    this._pool = new SimplePool();
-    this._pubkey = getPublicKey(this.secretKey);
+    if (!this._ensurePromise) {
+      this._ensurePromise = (async () => {
+        const { SimplePool, getPublicKey } = await import('nostr-tools');
+        this._pool = new SimplePool();
+        this._pubkey = getPublicKey(this.secretKey);
+      })();
+    }
+    await this._ensurePromise;
   }
 
   async _publish(event) {
@@ -271,15 +284,24 @@ export class MultiRelay {
   async appendMessage(filename, message) {
     const results = await Promise.allSettled(this.relays.map((r) => r.appendMessage(filename, message)));
     const fulfilled = results.find((r) => r.status === 'fulfilled');
-    if (!fulfilled) throw results[0].reason;
+    if (!fulfilled) throw this._aggregateError(results);
     return fulfilled.value;
   }
 
   async writeFile(filename, data) {
     const results = await Promise.allSettled(this.relays.map((r) => r.writeFile(filename, data)));
     const fulfilled = results.find((r) => r.status === 'fulfilled');
-    if (!fulfilled) throw results[0].reason;
+    if (!fulfilled) throw this._aggregateError(results);
     return data;
+  }
+
+  // Every relay failed — surface every relay's reason, not just the
+  // first. Found live: with only the first reason shown, a Nostr-specific
+  // failure was invisible behind an unrelated "GistRelay: write failed
+  // with 403" message, which looked like a Gist-only problem it wasn't.
+  _aggregateError(results) {
+    const reasons = results.map((r) => r.reason?.message ?? String(r.reason)).join('; ');
+    return new Error(`MultiRelay: every relay failed — ${reasons}`);
   }
 
   close() {
