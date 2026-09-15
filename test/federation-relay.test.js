@@ -35,6 +35,16 @@ test('MultiRelay.readFile: throws only when every relay fails', async () => {
   await assert.rejects(() => multi.readFile('whatever.json'), /always fails/);
 });
 
+test('MultiRelay.readFile: an earlier relay erroring must not mask a later relay\'s valid empty result', async () => {
+  // Live bug: Gist 403'd (rate limited) while Nostr had nothing yet for a
+  // brand new file (a real, valid "empty" — not an error) — this must
+  // resolve to [], not re-throw the unrelated Gist error.
+  const empty = new InMemoryRelay(); // never written to — readFile resolves to [], not an error
+  const multi = new MultiRelay([new FailingRelay(), empty]);
+  const result = await multi.readFile('never-published.json');
+  assert.deepEqual(result, []);
+});
+
 test('MultiRelay.writeFile: fans out to every relay, succeeds if at least one does', async () => {
   const good = new InMemoryRelay();
   const multi = new MultiRelay([new FailingRelay(), good]);

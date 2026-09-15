@@ -246,16 +246,25 @@ export class MultiRelay {
 
   async readFile(filename) {
     let lastErr;
+    // "Every relay failed" must mean every relay actually THREW — a later
+    // relay succeeding with a legitimately empty result (nothing published
+    // there yet) is a real, valid answer and must not be masked by an
+    // earlier, unrelated relay's error. Found live: Gist 403'd (rate
+    // limited) while Nostr correctly had nothing yet for a brand new file —
+    // without tracking success separately from emptiness, that re-threw
+    // the Gist error instead of returning the true (empty) result.
+    let sawSuccess = false;
     for (const relay of this.relays) {
       try {
         const result = await relay.readFile(filename);
+        sawSuccess = true;
         const isEmpty = Array.isArray(result) ? result.length === 0 : result == null;
         if (!isEmpty) return result;
       } catch (err) {
         lastErr = err;
       }
     }
-    if (lastErr) throw lastErr;
+    if (!sawSuccess && lastErr) throw lastErr;
     return [];
   }
 
