@@ -7,3 +7,5 @@ vortexia.port.json
 __pycache__/
 *.pyc
 HANDOFF.md
+.las-agent.json
+.agent.json
