@@ -147,6 +147,44 @@ export class VortexiaClient extends EventEmitter {
   }
 
   /**
+   * Like send(), but resolves only once the broker has actually
+   * acknowledged the publish (PUBACK, since this always uses QoS 1), and
+   * REJECTS — rather than hanging silently forever — if that doesn't
+   * happen within `timeoutMs`.
+   *
+   * send() is fire-and-forget by design, and that's fine for the vast
+   * majority of callers (same-process local delivery, where the broker
+   * connection is never in doubt). It's a real bug for anything crossing
+   * a connection that can die without warning — e.g. DirectMqttTransport
+   * (see directTransport.js) publishing across machines: mqtt.js QUEUES a
+   * QoS-1 publish instead of erroring when the client is disconnected but
+   * not `.end()`-ed (a socket that died without a clean FIN, or — as here
+   * — reconnectPeriod: 0 meaning it will never retry to flush that
+   * queue), so the message can vanish silently while the caller believes
+   * it succeeded. Found live: a peer's direct connection still looked
+   * "connected" after the other side restarted; the message never
+   * arrived and nothing ever threw, so ConnectionRouter never got the
+   * chance to fall back to the relay.
+   */
+  sendConfirmed(toName, text, { from = this.name, source = 'agent', timeoutMs = 3000, ...extra } = {}) {
+    if (!this.mqttClient) throw new Error('client not registered — call register(name) first');
+    const envelope = { ...buildEnvelope({ from, to: toName, source, text }), ...extra };
+    const isBroadcast = toName === 'broadcast';
+    const topic = isBroadcast ? BROADCAST_TOPIC : inboxTopic(toName);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`sendConfirmed: no ack from broker within ${timeoutMs}ms — connection is likely dead`)),
+        timeoutMs,
+      );
+      this.mqttClient.publish(topic, JSON.stringify(envelope), { qos: 1, retain: !isBroadcast }, (err) => {
+        clearTimeout(timer);
+        if (err) reject(err);
+        else resolve(envelope);
+      });
+    });
+  }
+
+  /**
    * Ask another agent for its scope-ladder text at a given detail level
    * ('short' | 'more' | 'full' | {maxChars: N} — meaning is up to the
    * target's own onScopeQuery handler). Resolves with

@@ -54,7 +54,7 @@ export class DirectConnection {
 
   async deliver(envName, routed) {
     for (const agentName of routed.agentNames) {
-      this.transport.send(agentName, routed.text ?? routed.intent, {
+      await this.transport.send(agentName, routed.text ?? routed.intent, {
         from: routed.from,
         kind: 'vortex-relay-delivery',
         routedFrom: routed.routedFrom,

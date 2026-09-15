@@ -121,6 +121,29 @@ test('auto mode falls back to the relay when the direct transport send throws', 
   }
 });
 
+test('DirectMqttTransport.send rejects (bounded by timeoutMs) instead of hanging when the underlying publish never acks', async () => {
+  // Reproduces the exact live bug: a connection that still LOOKS connected
+  // (register() succeeded, no 'close' event fired yet) but whose publish
+  // silently vanishes into mqtt.js's internal queue — see client.js's
+  // sendConfirmed doc comment. Before the fix, DirectMqttTransport.send
+  // was fire-and-forget and would have resolved as if it succeeded.
+  class StuckClient {
+    async register() { return this; }
+    on() {}
+    async sendConfirmed(toName, text, { timeoutMs = 3000 } = {}) {
+      return new Promise((_, reject) => setTimeout(() => reject(new Error(`sendConfirmed: no ack from broker within ${timeoutMs}ms — connection is likely dead`)), timeoutMs));
+    }
+  }
+
+  const transport = new DirectMqttTransport({ envName: 'mac-2', host: 'localhost', mqttPort: 1, ClientImpl: StuckClient });
+  await transport.connect();
+
+  await assert.rejects(
+    () => transport.send('Facturas', 'hola', { timeoutMs: 50 }),
+    /no ack from broker within 50ms/,
+  );
+});
+
 test('transportPins pinned to a named connection that has no live match: drops (never falls back to the relay)', async () => {
   const relay = new InMemoryRelay();
   const realAppend = relay.appendMessage.bind(relay);

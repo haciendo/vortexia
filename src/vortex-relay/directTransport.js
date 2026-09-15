@@ -57,10 +57,16 @@ export class DirectMqttTransport {
     this.client.on('close', () => { this.connected = false; });
   }
 
-  /** Publish straight into the peer's real inbox topic — bypasses vortex-relay entirely. */
-  send(agentName, text, extra = {}) {
+  /**
+   * Publish straight into the peer's real inbox topic — bypasses
+   * vortex-relay entirely. Uses sendConfirmed (see client.js), NOT
+   * send(): fire-and-forget would let a message vanish into mqtt.js's
+   * internal queue on a half-dead connection without ever throwing,
+   * silently defeating ConnectionRouter's fallback to the relay.
+   */
+  async send(agentName, text, extra = {}) {
     if (!this.connected) throw new Error(`DirectMqttTransport(${this.envName}): not connected`);
-    this.client.send(agentName, text, extra);
+    await this.client.sendConfirmed(agentName, text, extra);
   }
 
   async disconnect() {
