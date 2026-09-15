@@ -88,10 +88,18 @@ test('MultiRelay.appendMessage: fans out to every relay, succeeds if at least on
   assert.deepEqual(await good.readFile('inbox-env-b.json'), [{ text: 'hi' }]);
 });
 
-// Real network test against live public Nostr relays — same "skip if
-// unreachable" posture as broker.test.js's Ollama-dependent test, since a
-// CI box or an offline dev machine may not have outbound access.
+// Real network tests against live public Nostr relays — opt-in only
+// (VORTEXIA_TEST_NETWORK=1), not part of the default `npm test` run.
+// Found live: these two tests alone account for ~60s of an ~85s full
+// suite run, and repeatedly running them (dozens of times over one long
+// debugging session) adds real, unnecessary load to shared free public
+// infrastructure other environments depend on — the same category of
+// mistake as the earlier incident where unpinned test ports hit the real
+// port registry. `npm test` should be fast and side-effect-free by
+// default; real-network verification is still available, deliberately,
+// via `VORTEXIA_TEST_NETWORK=1 npm test`.
 async function nostrReachable() {
+  if (process.env.VORTEXIA_TEST_NETWORK !== '1') return false;
   try {
     const res = await fetch('https://relay.damus.io', { method: 'GET' });
     return res.ok || res.status === 426; // 426 Upgrade Required is the expected reply from an HTTP GET to a ws-only endpoint — still proves reachability
@@ -102,7 +110,7 @@ async function nostrReachable() {
 
 test('NostrRelay: real round trip against live public relays (writeFile + readFile, appendMessage log)', async (t) => {
   if (!(await nostrReachable())) {
-    t.skip('no network access to Nostr relays from this environment');
+    t.skip('real-network test opt-in (VORTEXIA_TEST_NETWORK=1) or unreachable');
     return;
   }
 
@@ -135,7 +143,7 @@ test('NostrRelay: real round trip against live public relays (writeFile + readFi
 
 test('NostrRelay: reads a known peer\'s events (cross-identity), but not an unknown identity\'s', async (t) => {
   if (!(await nostrReachable())) {
-    t.skip('no network access to Nostr relays from this environment');
+    t.skip('real-network test opt-in (VORTEXIA_TEST_NETWORK=1) or unreachable');
     return;
   }
 
@@ -167,4 +175,58 @@ test('NostrRelay: reads a known peer\'s events (cross-identity), but not an unkn
     stranger.close();
     reader.close();
   }
+});
+
+// Circuit breaker: "chain multiple transports, fall back automatically"
+// only really means something if a persistently-failing one stops being
+// retried on every single call — otherwise every operation keeps paying
+// for (and waiting on) a transport that's been down for an hour. José's
+// ask directly: this must be automatic, not something a human/agent has
+// to fix by editing config on the other end.
+class CountingRelay {
+  constructor(name, { failUntilCall = Infinity } = {}) {
+    this.name = name;
+    this.failUntilCall = failUntilCall;
+    this.calls = 0;
+  }
+  async readFile() {
+    this.calls++;
+    if (this.calls <= this.failUntilCall) throw new Error(`${this.name}: fail #${this.calls}`);
+    return { ok: this.name };
+  }
+  async writeFile() {
+    this.calls++;
+    if (this.calls <= this.failUntilCall) throw new Error(`${this.name}: fail #${this.calls}`);
+    return {};
+  }
+  async appendMessage(...args) { return this.writeFile(...args); }
+}
+
+test('MultiRelay circuit breaker: a relay failing past the threshold is skipped on later reads, not retried every time', async () => {
+  const flaky = new CountingRelay('flaky'); // always fails
+  const good = new InMemoryRelay();
+  await good.writeFile('directory-ba-mac.json', { envName: 'ba-mac', agents: [{ agentName: 'X', scopeText: 'x' }] });
+  const multi = new MultiRelay([flaky, good], { failureThreshold: 2, cooldownMs: 5000 });
+
+  await multi.readFile('directory-ba-mac.json'); // flaky fails (1)
+  await multi.readFile('directory-ba-mac.json'); // flaky fails (2) -> circuit opens
+  assert.equal(flaky.calls, 2);
+
+  await multi.readFile('directory-ba-mac.json'); // circuit open -> flaky must be SKIPPED entirely
+  assert.equal(flaky.calls, 2, 'an open circuit must not be attempted again before its cooldown elapses');
+});
+
+test('MultiRelay circuit breaker: a relay recovers after its cooldown and closes on success', async () => {
+  const recovers = new CountingRelay('recovers', { failUntilCall: 2 }); // fails twice, then works
+  const other = new CountingRelay('other', { failUntilCall: Infinity }); // always fails — forces MultiRelay to actually need `recovers`
+  const multi = new MultiRelay([recovers, other], { failureThreshold: 2, cooldownMs: 30 });
+
+  await assert.rejects(() => multi.readFile('x.json')); // recovers fails (1), other fails -> every relay failed
+  await assert.rejects(() => multi.readFile('x.json')); // recovers fails (2) -> circuit opens; other fails again
+  assert.equal(recovers.calls, 2);
+
+  await new Promise((r) => setTimeout(r, 40)); // past cooldownMs
+  const result = await multi.readFile('x.json'); // circuit half-open -> tried again -> succeeds (call #3 > failUntilCall)
+  assert.deepEqual(result, { ok: 'recovers' });
+  assert.equal(recovers.calls, 3);
 });

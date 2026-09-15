@@ -298,13 +298,30 @@ export class NostrRelay {
  * EVERY relay in parallel — a write should land wherever it can, not just
  * the fastest one, since a reader might only be listening on a relay that
  * wasn't first. A write only fails if every relay's write failed.
+ *
+ * Circuit breaker, per relay: a relay that fails `failureThreshold` times
+ * in a row is marked "open" — every read/write moves it to the END of the
+ * attempt order (and reads skip it outright) for `cooldownMs`, instead of
+ * every single call wasting a round-trip attempting a transport that's
+ * been failing for the last hour. It's never permanently excluded: after
+ * the cooldown, the next call tries it again (a real request, not a
+ * side-channel health check) — success closes the circuit and resets it
+ * to normal priority, another failure reopens it for another cooldown.
+ * This is what makes "chain multiple transports, fall back automatically"
+ * actually automatic — found live: without this, degrading Gist required
+ * a human/agent to manually tell the OTHER environment to drop it from
+ * config, because every call kept retrying it first no matter how long
+ * it had been down.
  */
 export class MultiRelay {
   name = 'multi';
 
-  constructor(relays) {
+  constructor(relays, { failureThreshold = 3, cooldownMs = 60000 } = {}) {
     if (!relays?.length) throw new Error('MultiRelay requires at least one relay');
     this.relays = relays;
+    this.failureThreshold = failureThreshold;
+    this.cooldownMs = cooldownMs;
+    this._health = new Map(relays.map((r) => [r, { consecutiveFailures: 0, openUntil: 0 }]));
     // Which underlying relay actually served the MOST RECENT readFile /
     // writeFile+appendMessage — read immediately after the awaited call by
     // FederationBridge (no other await happens in between, so nothing else
@@ -313,6 +330,36 @@ export class MultiRelay {
     // metadata). Not meaningful before the first call; null until then.
     this.lastReadVia = null;
     this.lastWriteVia = null;
+  }
+
+  _isOpen(relay) {
+    return this._health.get(relay).openUntil > Date.now();
+  }
+
+  _recordSuccess(relay) {
+    const h = this._health.get(relay);
+    h.consecutiveFailures = 0;
+    h.openUntil = 0;
+  }
+
+  _recordFailure(relay) {
+    const h = this._health.get(relay);
+    h.consecutiveFailures++;
+    if (h.consecutiveFailures >= this.failureThreshold) {
+      h.openUntil = Date.now() + this.cooldownMs;
+    }
+  }
+
+  // Closed/half-open relays first (their original relative order
+  // preserved), open ones last. Open relays stay in the list — a fully-
+  // open set still attempts something instead of failing outright, and
+  // this is also what lets a genuinely-recovered relay be noticed again:
+  // it gets tried last, but it still gets tried.
+  _orderedRelays() {
+    const usable = [];
+    const open = [];
+    for (const r of this.relays) (this._isOpen(r) ? open : usable).push(r);
+    return [...usable, ...open];
   }
 
   async readFile(filename) {
@@ -325,37 +372,50 @@ export class MultiRelay {
     // without tracking success separately from emptiness, that re-threw
     // the Gist error instead of returning the true (empty) result.
     let sawSuccess = false;
-    for (const relay of this.relays) {
+    let lastSuccessRelay = null;
+    // Skip open (recently-failing) relays entirely for reads — unlike
+    // writes, a read only needs ONE good answer, so there's no benefit to
+    // burning time on a relay that's very likely still down; it still
+    // gets retried once its cooldown elapses.
+    for (const relay of this._orderedRelays()) {
+      if (this._isOpen(relay)) continue;
       try {
         const result = await relay.readFile(filename);
+        this._recordSuccess(relay);
         sawSuccess = true;
+        lastSuccessRelay = relay;
         const isEmpty = Array.isArray(result) ? result.length === 0 : result == null;
         if (!isEmpty) {
           this.lastReadVia = relay.name;
           return result;
         }
       } catch (err) {
+        this._recordFailure(relay);
         lastErr = err;
       }
     }
     if (!sawSuccess && lastErr) throw lastErr;
-    this.lastReadVia = sawSuccess ? this.relays.find((r) => r.name)?.name ?? null : null;
+    this.lastReadVia = lastSuccessRelay?.name ?? null;
     return [];
   }
 
   async appendMessage(filename, message) {
-    const results = await Promise.allSettled(this.relays.map((r) => r.appendMessage(filename, message)));
+    const ordered = this._orderedRelays();
+    const results = await Promise.allSettled(ordered.map((r) => r.appendMessage(filename, message)));
+    results.forEach((r, i) => (r.status === 'fulfilled' ? this._recordSuccess(ordered[i]) : this._recordFailure(ordered[i])));
     const index = results.findIndex((r) => r.status === 'fulfilled');
     if (index === -1) throw this._aggregateError(results);
-    this.lastWriteVia = this.relays[index].name;
+    this.lastWriteVia = ordered[index].name;
     return results[index].value;
   }
 
   async writeFile(filename, data) {
-    const results = await Promise.allSettled(this.relays.map((r) => r.writeFile(filename, data)));
+    const ordered = this._orderedRelays();
+    const results = await Promise.allSettled(ordered.map((r) => r.writeFile(filename, data)));
+    results.forEach((r, i) => (r.status === 'fulfilled' ? this._recordSuccess(ordered[i]) : this._recordFailure(ordered[i])));
     const index = results.findIndex((r) => r.status === 'fulfilled');
     if (index === -1) throw this._aggregateError(results);
-    this.lastWriteVia = this.relays[index].name;
+    this.lastWriteVia = ordered[index].name;
     return data;
   }
 
