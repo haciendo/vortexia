@@ -50,6 +50,7 @@ export class FederationBridge {
     this.localClient = null;
     this._pollTimer = null;
     this._directoryTimer = null;
+    this._publishTimer = null;
     this._lastIndex = -1;
     // What resolveDirectoryName() searches — starts as the static seed,
     // widened by syncDirectory() once it's run at least once.
@@ -181,20 +182,45 @@ export class FederationBridge {
     return { entries: this._mergedEntries, collisions };
   }
 
-  /** Periodically republish this env's roster and refresh the merged directory. */
-  startDirectorySync(agents, intervalMs = 5000) {
-    const tick = () => {
-      this.publishSelf(agents)
-        .then(() => this.syncDirectory())
-        .catch((err) => console.error(`[federation:${this.envName}] directory sync failed:`, err));
+  /**
+   * Periodically republish this env's roster and refresh the merged
+   * directory. Publish and sync are independent, deliberately:
+   *
+   *  - Different budgets: a GistRelay write hits GitHub's separate
+   *    "gist_update" secondary rate limit (100/hour, TOTAL across every
+   *    writer sharing that token — not per-process), while a read doesn't.
+   *    Chaining publish -> sync meant one rate-limited write silently
+   *    starved every read behind it too — an environment already in the
+   *    directory would stop seeing OTHER environments' updates just
+   *    because ITS OWN publish failed, which has nothing to do with
+   *    whether reads are still fine.
+   *  - Different natural frequency: a roster changes rarely (an agent
+   *    registers/deregisters); the merged directory (who else has shown
+   *    up) is worth refreshing far more often, and cheaply, since reads
+   *    aren't the scarce resource here.
+   *
+   * Defaults: publish every 5 min (12/hour per environment — two
+   * environments sharing one token stay at 24/hour, well under the
+   * 100/hour cap with room for manual/test traffic too); sync every 15s.
+   */
+  startDirectorySync(agents, { publishIntervalMs = 300000, syncIntervalMs = 15000 } = {}) {
+    const publishTick = () => {
+      this.publishSelf(agents).catch((err) => console.error(`[federation:${this.envName}] directory publish failed:`, err));
     };
-    tick();
-    this._directoryTimer = setInterval(tick, intervalMs);
+    const syncTick = () => {
+      this.syncDirectory().catch((err) => console.error(`[federation:${this.envName}] directory sync failed:`, err));
+    };
+    publishTick();
+    syncTick();
+    this._publishTimer = setInterval(publishTick, publishIntervalMs);
+    this._directoryTimer = setInterval(syncTick, syncIntervalMs);
     return this;
   }
 
   stopDirectorySync() {
+    clearInterval(this._publishTimer);
     clearInterval(this._directoryTimer);
+    this._publishTimer = null;
     this._directoryTimer = null;
   }
 

@@ -66,7 +66,11 @@ async function startFederation(mqttPort) {
 
   const bridge = new FederationBridge({ envName, relay, envNames }).attach(gateway);
   const roster = await discoverLocalRoster();
-  bridge.startDirectorySync(roster, 10000);
+  // See bridge.js's startDirectorySync doc comment: publish (a Gist write)
+  // hits GitHub's 100/hour gist_update secondary limit shared across every
+  // environment using the same token, so it stays well below that; sync
+  // (a read) doesn't share that budget and can run far more often.
+  bridge.startDirectorySync(roster, { publishIntervalMs: 300000, syncIntervalMs: 15000 });
   bridge.startPolling(1000);
 
   logger.info(`[vortexia] federation enabled: env=${envName}, envNames=[${envNames.join(', ')}], local roster=${roster.length} agent(s)`);
