@@ -2,11 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startBroker } from '../src/broker.js';
 import { VortexiaClient } from '../src/client.js';
-import { FederationBridge, FEDERATION_KIND } from '../src/federation/bridge.js';
-import { InMemoryRelay } from '../src/federation/relay.js';
-import { bagOfWordsEmbedder } from '../src/federation/embeddings.js';
+import { VortexRelayBridge, VORTEX_RELAY_KIND } from '../src/vortex-relay/bridge.js';
+import { InMemoryRelay } from '../src/vortex-relay/relay.js';
+import { bagOfWordsEmbedder } from '../src/vortex-relay/embeddings.js';
 
-// Same directory used in federation-router.test.js: env-a/env-c are both
+// Same directory used in vortex-relay-router.test.js: env-a/env-c are both
 // "weather", env-b is "billing" — lets one test prove fan-out (one message
 // reaching two environments) and another prove exclusivity (reaching only
 // one), same as the router unit tests, but now end-to-end across three
@@ -43,7 +43,7 @@ async function setupEnv(envName, agentName, relay) {
   const gateway = new VortexiaClient({ port: broker.mqttPort });
   await gateway.register(`${envName}-gateway`);
 
-  const bridge = new FederationBridge({
+  const bridge = new VortexRelayBridge({
     envName,
     relay,
     directory,
@@ -78,15 +78,15 @@ test('a federated weather intent reaches env-a AND env-c, three independent brok
   const c = await setupEnv('env-c', 'Meteo', relay);
 
   try {
-    const climaGot = waitForMessage(a.agentClient, (e) => e.kind === 'federation-delivery');
-    const meteoGot = waitForMessage(c.agentClient, (e) => e.kind === 'federation-delivery');
+    const climaGot = waitForMessage(a.agentClient, (e) => e.kind === 'vortex-relay-delivery');
+    const meteoGot = waitForMessage(c.agentClient, (e) => e.kind === 'vortex-relay-delivery');
     let facturasGotAnything = false;
     b.agentClient.on('message', () => { facturasGotAnything = true; });
 
     // Broadcast the intent on env-a's own broker — as if a human/agent in
     // that environment asked for help with no named recipient.
     a.gateway.send('broadcast', 'pronostico del tiempo y viento para mañana', {
-      kind: FEDERATION_KIND,
+      kind: VORTEX_RELAY_KIND,
       intent: 'pronostico del tiempo y viento para mañana',
     });
 
@@ -116,9 +116,9 @@ test('a federated billing intent reaches only env-b, even though it started on e
   const c = await setupEnv('env-c', 'Meteo', relay);
 
   try {
-    const facturasGot = waitForMessage(b.agentClient, (e) => e.kind === 'federation-delivery');
+    const facturasGot = waitForMessage(b.agentClient, (e) => e.kind === 'vortex-relay-delivery');
     let othersGotAnything = false;
-    const markDelivery = (e) => { if (e.kind === 'federation-delivery') othersGotAnything = true; };
+    const markDelivery = (e) => { if (e.kind === 'vortex-relay-delivery') othersGotAnything = true; };
     a.agentClient.on('message', markDelivery);
     c.agentClient.on('message', markDelivery);
 
@@ -126,7 +126,7 @@ test('a federated billing intent reaches only env-b, even though it started on e
     // than the one that ends up handling it — proving routing is by scope
     // match, not "whichever environment happened to ask."
     c.gateway.send('broadcast', 'necesito pagar mi factura', {
-      kind: FEDERATION_KIND,
+      kind: VORTEX_RELAY_KIND,
       intent: 'quiero pagar mi factura de este mes',
     });
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LanDiscovery } from '../src/federation/lanDiscovery.js';
+import { LanDiscovery } from '../src/vortex-relay/lanDiscovery.js';
 
 // Same-host advertise/discover — proves the mDNS publish+browse code paths
 // work, NOT that multicast actually crosses two real machines on a real

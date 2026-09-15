@@ -2,17 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startBroker } from '../src/broker.js';
 import { VortexiaClient } from '../src/client.js';
-import { FederationBridge, FEDERATION_DIRECT_KIND } from '../src/federation/bridge.js';
-import { InMemoryRelay } from '../src/federation/relay.js';
+import { VortexRelayBridge, VORTEX_RELAY_DIRECT_KIND } from '../src/vortex-relay/bridge.js';
+import { InMemoryRelay } from '../src/vortex-relay/relay.js';
 
 // Point-to-point delivery — the "las agent inject <exact name>, wherever it
-// lives" path — as opposed to federation-bridge.test.js, which covers the
+// lives" path — as opposed to vortex-relay-bridge.test.js, which covers the
 // no-named-recipient, scope-matched path. Three environments, matching
 // José's "design for N, not just 2" requirement (a third machine is
 // expected to join the real deployment).
 
 // Pinned, incrementing ports — see the same comment in
-// federation-bridge.test.js: these tests run several brokers concurrently
+// vortex-relay-bridge.test.js: these tests run several brokers concurrently
 // within one process and must never fall back to the registry's
 // auto-assign, which would hit the real, system-wide local-agent-society
 // port registry and race/collide with whatever vortexia instance is
@@ -36,7 +36,7 @@ async function setupEnv(envName, agents, relay) {
   const gateway = new VortexiaClient({ port: broker.mqttPort });
   await gateway.register(`${envName}-gateway`);
 
-  const bridge = new FederationBridge({ envName, relay, envNames: ['mac-1', 'mac-2', 'mac-3'] }).attach(gateway);
+  const bridge = new VortexRelayBridge({ envName, relay, envNames: ['mac-1', 'mac-2', 'mac-3'] }).attach(gateway);
   await bridge.publishSelf(Object.entries(agents).map(([agentName, scopeText]) => ({ agentName, scopeText })));
   await bridge.syncDirectory();
   bridge.startPolling(50);
@@ -82,10 +82,10 @@ test('exact-name delivery crosses to the owning environment, bypassing scope mat
   await a.bridge.syncDirectory();
 
   try {
-    const got = waitForMessage(b.clients.Facturas, (e) => e.kind === 'federation-delivery');
+    const got = waitForMessage(b.clients.Facturas, (e) => e.kind === 'vortex-relay-delivery');
 
     a.gateway.send('mac-1-gateway', 'necesito ver la factura de este mes', {
-      kind: FEDERATION_DIRECT_KIND,
+      kind: VORTEX_RELAY_DIRECT_KIND,
       from: 'Robotics',
       to: 'Facturas',
     });
@@ -107,12 +107,12 @@ test('exact-name delivery: a bare name that collides across environments resolve
   await b.bridge.syncDirectory();
 
   try {
-    const localGot = waitForMessage(a.clients.System, (e) => e.kind === 'federation-delivery');
+    const localGot = waitForMessage(a.clients.System, (e) => e.kind === 'vortex-relay-delivery');
     let remoteGotAnything = false;
     b.clients.System.on('message', () => { remoteGotAnything = true; });
 
     a.gateway.send('mac-1-gateway', 'reiniciá el servicio', {
-      kind: FEDERATION_DIRECT_KIND,
+      kind: VORTEX_RELAY_DIRECT_KIND,
       from: 'Robotics',
       to: 'System',
     });
@@ -135,13 +135,13 @@ test('exact-name delivery: a bare name colliding across >1 REMOTE environments r
   await asker.bridge.syncDirectory();
 
   try {
-    const errorGot = waitForMessage(asker.clients.Robotics, (e) => e.kind === 'federation-direct-error');
+    const errorGot = waitForMessage(asker.clients.Robotics, (e) => e.kind === 'vortex-relay-direct-error');
     let anyoneGotDelivery = false;
-    b.clients.System.on('message', (e) => { if (e.kind === 'federation-delivery') anyoneGotDelivery = true; });
-    c.clients.System.on('message', (e) => { if (e.kind === 'federation-delivery') anyoneGotDelivery = true; });
+    b.clients.System.on('message', (e) => { if (e.kind === 'vortex-relay-delivery') anyoneGotDelivery = true; });
+    c.clients.System.on('message', (e) => { if (e.kind === 'vortex-relay-delivery') anyoneGotDelivery = true; });
 
     asker.gateway.send('mac-1-gateway', 'reiniciá el servicio', {
-      kind: FEDERATION_DIRECT_KIND,
+      kind: VORTEX_RELAY_DIRECT_KIND,
       from: 'Robotics',
       to: 'System',
     });
@@ -165,12 +165,12 @@ test('exact-name delivery: an env-qualified name (name@env) resolves exactly eve
   await asker.bridge.syncDirectory();
 
   try {
-    const got = waitForMessage(c.clients.System, (e) => e.kind === 'federation-delivery');
+    const got = waitForMessage(c.clients.System, (e) => e.kind === 'vortex-relay-delivery');
     let bGotDelivery = false;
-    b.clients.System.on('message', (e) => { if (e.kind === 'federation-delivery') bGotDelivery = true; });
+    b.clients.System.on('message', (e) => { if (e.kind === 'vortex-relay-delivery') bGotDelivery = true; });
 
     asker.gateway.send('mac-1-gateway', 'reiniciá el servicio', {
-      kind: FEDERATION_DIRECT_KIND,
+      kind: VORTEX_RELAY_DIRECT_KIND,
       from: 'Robotics',
       to: 'System@mac-3',
     });
@@ -191,10 +191,10 @@ test('exact-name delivery: an unknown name replies with a not-found error', asyn
   await asker.bridge.syncDirectory();
 
   try {
-    const errorGot = waitForMessage(asker.clients.Robotics, (e) => e.kind === 'federation-direct-error');
+    const errorGot = waitForMessage(asker.clients.Robotics, (e) => e.kind === 'vortex-relay-direct-error');
 
     asker.gateway.send('mac-1-gateway', 'hola', {
-      kind: FEDERATION_DIRECT_KIND,
+      kind: VORTEX_RELAY_DIRECT_KIND,
       from: 'Robotics',
       to: 'Ghost',
     });

@@ -1,5 +1,5 @@
-// Bridges one environment's local vortexia broker to the federation: a
-// local agent publishes a "federation intent" (no named recipient — just
+// Bridges one environment's local vortexia broker to vortex-relay: a
+// local agent publishes a "vortex-relay intent" (no named recipient — just
 // what it needs, per docs/future-las-agent-scope-router.md section 1b),
 // the bridge decides which environment(s) actually match via router.js,
 // and either delivers locally (same environment) or writes it into the
@@ -12,19 +12,19 @@
 import { pickTargets } from './router.js';
 import { publishDirectory, mergeDirectories, resolveDirectoryName } from './directory.js';
 
-export const FEDERATION_KIND = 'federation-intent';
+export const VORTEX_RELAY_KIND = 'vortex-relay-intent';
 
 // Point-to-point: "deliver to this exact name, wherever it lives" — as
-// opposed to FEDERATION_KIND, which has no named recipient and routes by
+// opposed to VORTEX_RELAY_KIND, which has no named recipient and routes by
 // scope match instead. A local backend (`las agent inject`) that can't
 // find `targetName` in its own local registry publishes one of these to
 // the environment's gateway agent instead of 404ing; the bridge resolves
 // the name (local-first, then federated) and either delivers locally or
 // relays to the owning environment, bypassing pickTargets entirely — an
 // exact name is exact, it doesn't need a semantic match.
-export const FEDERATION_DIRECT_KIND = 'federation-direct';
+export const VORTEX_RELAY_DIRECT_KIND = 'vortex-relay-direct';
 
-export class FederationBridge {
+export class VortexRelayBridge {
   /**
    * @param {object} opts
    * @param {string} opts.envName - this environment's name (must match a
@@ -38,7 +38,7 @@ export class FederationBridge {
    * @param {string[]} [opts.envNames] - every environment expected to
    *   publish its own directory file on the relay (this one included);
    *   enables syncDirectory()/startDirectorySync() for exact-name
-   *   (FEDERATION_DIRECT_KIND) resolution across N environments.
+   *   (VORTEX_RELAY_DIRECT_KIND) resolution across N environments.
    * @param {object} [opts.matchOpts] - passed through to pickTargets (minScore, closeness, embedder)
    */
   constructor({ envName, relay, directory = [], envNames, matchOpts = {} }) {
@@ -67,17 +67,17 @@ export class FederationBridge {
     this.localClient = localClient;
     localClient.on('message', (envelope) => {
       this._onLocalMessage(envelope).catch((err) => {
-        console.error(`[federation:${this.envName}] failed handling local message:`, err);
+        console.error(`[vortex-relay:${this.envName}] failed handling local message:`, err);
       });
     });
     return this;
   }
 
   async _onLocalMessage(envelope) {
-    if (envelope.kind === FEDERATION_DIRECT_KIND) {
+    if (envelope.kind === VORTEX_RELAY_DIRECT_KIND) {
       return this._onDirectMessage(envelope);
     }
-    if (envelope.kind !== FEDERATION_KIND) return;
+    if (envelope.kind !== VORTEX_RELAY_KIND) return;
 
     const targets = await pickTargets(envelope.intent, this._mergedEntries, this.matchOpts);
     const agentNamesByEnv = new Map();
@@ -114,7 +114,7 @@ export class FederationBridge {
     for (const agentName of routed.agentNames) {
       this.localClient.send(agentName, routed.text ?? routed.intent, {
         from: routed.from,
-        kind: 'federation-delivery',
+        kind: 'vortex-relay-delivery',
         routedFrom: routed.routedFrom,
         transport: routed.transport ?? 'unknown',
       });
@@ -135,7 +135,7 @@ export class FederationBridge {
     const resolved = resolveDirectoryName(envelope.to, this.envName, this._mergedEntries);
 
     if (resolved.status === 'not-found') {
-      this._replyDirectError(envelope, `no agent named "${envelope.to}" is known in the federation`);
+      this._replyDirectError(envelope, `no agent named "${envelope.to}" is known across vortex-relay`);
       return;
     }
     if (resolved.status === 'ambiguous') {
@@ -163,7 +163,7 @@ export class FederationBridge {
   _replyDirectError(envelope, reason) {
     if (!envelope.from) return;
     this.localClient.send(envelope.from, reason, {
-      kind: 'federation-direct-error',
+      kind: 'vortex-relay-direct-error',
       to: envelope.to,
     });
   }
@@ -193,7 +193,7 @@ export class FederationBridge {
     // most-recently-STARTED call's result ever win, regardless of finish
     // order.
     const generation = ++this._syncGeneration;
-    const { entries, collisions } = await mergeDirectories(this.relay, this.envNames);
+    const { entries, collisions, failures } = await mergeDirectories(this.relay, this.envNames);
     if (generation !== this._syncGeneration) {
       // A newer syncDirectory() call has since started — its result (once
       // it lands) is what should win, not this now-stale one. Bail out
@@ -205,7 +205,21 @@ export class FederationBridge {
       return { entries: this._mergedEntries, collisions };
     }
     for (const [name, envs] of collisions) {
-      console.warn(`[federation:${this.envName}] "${name}" exists in multiple environments: ${envs.join(', ')} — exact-name delivery to the bare name will require a name@env qualifier unless one is local`);
+      console.warn(`[vortex-relay:${this.envName}] "${name}" exists in multiple environments: ${envs.join(', ')} — exact-name delivery to the bare name will require a name@env qualifier unless one is local`);
+    }
+    // A failed read (every relay threw for that envName this cycle — e.g. a
+    // simultaneous Gist rate-limit + Nostr timeout, seen live) means
+    // "unknown this cycle," not "this environment has no agents." Without
+    // this fallback, one bad cycle would silently drop that environment's
+    // agents from _mergedEntries for ~15s, and any exact-name
+    // (name@env) vortex-relay-direct lookup landing in that window got a
+    // false not-found even though nothing changed on the far side.
+    for (const envName of failures) {
+      const stale = this._mergedEntries.filter((e) => e.envName === envName);
+      if (stale.length) {
+        console.warn(`[vortex-relay:${this.envName}] directory read for ${envName} failed this cycle — keeping ${stale.length} stale entr${stale.length === 1 ? 'y' : 'ies'} from the last successful sync`);
+        entries.push(...stale);
+      }
     }
     // Static seed entries (if any) stay available too, e.g. for tests that
     // never call publishSelf/syncDirectory against a real relay directory.
@@ -244,14 +258,14 @@ export class FederationBridge {
       if (publishBusy) return;
       publishBusy = true;
       this.publishSelf(agents)
-        .catch((err) => console.error(`[federation:${this.envName}] directory publish failed:`, err))
+        .catch((err) => console.error(`[vortex-relay:${this.envName}] directory publish failed:`, err))
         .finally(() => { publishBusy = false; });
     };
     const syncTick = () => {
       if (syncBusy) return;
       syncBusy = true;
       this.syncDirectory()
-        .catch((err) => console.error(`[federation:${this.envName}] directory sync failed:`, err))
+        .catch((err) => console.error(`[vortex-relay:${this.envName}] directory sync failed:`, err))
         .finally(() => { syncBusy = false; });
     };
     publishTick();
@@ -284,7 +298,7 @@ export class FederationBridge {
       if (busy) return;
       busy = true;
       this._pollOnce()
-        .catch((err) => console.error(`[federation:${this.envName}] poll failed:`, err))
+        .catch((err) => console.error(`[vortex-relay:${this.envName}] poll failed:`, err))
         .finally(() => { busy = false; });
     }, intervalMs);
     return this;

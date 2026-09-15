@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { InMemoryRelay, MultiRelay, NostrRelay } from '../src/federation/relay.js';
+import { InMemoryRelay, MultiRelay, NostrRelay } from '../src/vortex-relay/relay.js';
 
 test('NostrRelay.readFile: picks the NEWEST snapshot event by created_at, not the first one returned', async () => {
   // No real network: initialize the pool, then swap in a stub querySync

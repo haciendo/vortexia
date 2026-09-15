@@ -1,4 +1,4 @@
-// Builds this environment's federation roster (what publishDirectory
+// Builds this environment's vortex-relay roster (what publishDirectory
 // sends to the relay) from the SAME source of truth `las status` already
 // uses — the local-agent-society backend's /agents listing — rather than
 // a hand-maintained list. Each entry there has a `path`; that path's
@@ -7,7 +7,7 @@
 //
 // Best-effort by design, matching broker.js's claimPort: an unreachable
 // registry or an unreadable .las-agent.json means one fewer agent in the
-// roster, not a hard failure — federation should never be the reason a
+// roster, not a hard failure — vortex-relay should never be the reason a
 // local vortexia instance won't start.
 
 import fs from 'node:fs';

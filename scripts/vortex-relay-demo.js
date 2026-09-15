@@ -1,29 +1,29 @@
 #!/usr/bin/env node
-// Live, real-internet run of the federation PoC. Two or more of these,
+// Live, real-internet run of the vortex-relay PoC. Two or more of these,
 // run on the SAME machine or on different ones, join through nothing but
-// a shared GitHub Gist — see docs/federation-poc.md for setup.
+// a shared GitHub Gist — see docs/vortex-relay-poc.md for setup.
 //
 // Usage:
 //   VORTEXIA_GIST_ID=... VORTEXIA_GIST_TOKEN=... \
-//     node scripts/federation-demo.js <envName> <agentName> "<scopeText>"
+//     node scripts/vortex-relay-demo.js <envName> <agentName> "<scopeText>"
 
 import readline from 'node:readline';
 import { startBroker } from '../src/broker.js';
 import { VortexiaClient } from '../src/client.js';
-import { FederationBridge, FEDERATION_KIND } from '../src/federation/bridge.js';
-import { GistRelay } from '../src/federation/relay.js';
+import { VortexRelayBridge, VORTEX_RELAY_KIND } from '../src/vortex-relay/bridge.js';
+import { GistRelay } from '../src/vortex-relay/relay.js';
 
 const [envName, agentName, scopeText] = process.argv.slice(2);
 if (!envName || !agentName || !scopeText) {
-  console.error('Usage: node scripts/federation-demo.js <envName> <agentName> "<scopeText>"');
-  console.error('Requires env vars VORTEXIA_GIST_ID and VORTEXIA_GIST_TOKEN — see docs/federation-poc.md');
+  console.error('Usage: node scripts/vortex-relay-demo.js <envName> <agentName> "<scopeText>"');
+  console.error('Requires env vars VORTEXIA_GIST_ID and VORTEXIA_GIST_TOKEN — see docs/vortex-relay-poc.md');
   process.exit(1);
 }
 
 const gistId = process.env.VORTEXIA_GIST_ID;
 const token = process.env.VORTEXIA_GIST_TOKEN;
 if (!gistId || !token) {
-  console.error('Set VORTEXIA_GIST_ID and VORTEXIA_GIST_TOKEN — see docs/federation-poc.md');
+  console.error('Set VORTEXIA_GIST_ID and VORTEXIA_GIST_TOKEN — see docs/vortex-relay-poc.md');
   process.exit(1);
 }
 
@@ -71,7 +71,7 @@ console.log(`[${envName}] local broker on :${broker.mqttPort}`);
 const agentClient = new VortexiaClient({ port: broker.mqttPort });
 await agentClient.register(agentName);
 agentClient.on('message', (envelope) => {
-  if (envelope.kind === 'federation-delivery') {
+  if (envelope.kind === 'vortex-relay-delivery') {
     console.log(`\n[${agentName}] received: "${envelope.text}" (from ${envelope.from}, routed via ${envelope.routedFrom})`);
   }
 });
@@ -80,10 +80,10 @@ const gateway = new VortexiaClient({ port: broker.mqttPort });
 await gateway.register(`${envName}-gateway`);
 
 const directory = await joinDirectory();
-console.log(`[${envName}] joined the federation directory (${directory.length} agent(s) known so far):`);
+console.log(`[${envName}] joined the vortex-relay directory (${directory.length} agent(s) known so far):`);
 for (const d of directory) console.log(`  - ${d.envName}/${d.agentName}: ${d.scopeText}`);
 
-const bridge = new FederationBridge({ envName, relay, directory }).attach(gateway);
+const bridge = new VortexRelayBridge({ envName, relay, directory }).attach(gateway);
 bridge.startPolling(1000);
 
 // Other environments may join after this one starts — refresh periodically.
@@ -100,7 +100,7 @@ const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', (line) => {
   const intent = line.trim();
   if (!intent) return;
-  gateway.send('broadcast', intent, { kind: FEDERATION_KIND, intent });
+  gateway.send('broadcast', intent, { kind: VORTEX_RELAY_KIND, intent });
   console.log(`[${envName}] sent intent: "${intent}"`);
 });
 

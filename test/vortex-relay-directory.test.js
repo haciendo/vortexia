@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { InMemoryRelay } from '../src/federation/relay.js';
-import { publishDirectory, mergeDirectories, resolveDirectoryName } from '../src/federation/directory.js';
+import { InMemoryRelay } from '../src/vortex-relay/relay.js';
+import { publishDirectory, mergeDirectories, resolveDirectoryName } from '../src/vortex-relay/directory.js';
 
 test('mergeDirectories combines every published environment, skipping ones that never published', async () => {
   const relay = new InMemoryRelay();

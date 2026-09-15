@@ -1,13 +1,13 @@
-// Relay abstraction for the federation PoC: "a shared external mailbox two
+// Relay abstraction for vortex-relay: "a shared external mailbox two
 // vortexia garantes both read/write to, that isn't either of their own
 // MQTT brokers." Every implementation exposes the same two operations —
-// FederationBridge (bridge.js) only depends on this shape, not on Gists
+// VortexRelayBridge (bridge.js) only depends on this shape, not on Gists
 // specifically, so the transport can be swapped later (see
 // docs/future-las-agent-scope-router.md section 4, cross-machine
-// federation) without touching routing logic. See also MultiRelay below,
+// vortex-relay) without touching routing logic. See also MultiRelay below,
 // for combining several of these with automatic fallback.
 //
-// Each environment owns exactly one file (its "inbox from the federation")
+// Each environment owns exactly one file (its "inbox from vortex-relay")
 // and is the ONLY writer to it — every other environment only reads it.
 // That sidesteps the read-modify-write race a shared multi-writer file
 // would have (see GistRelay.appendMessage).
@@ -22,7 +22,7 @@
 /** In-memory relay — for deterministic tests with no network dependency. */
 export class InMemoryRelay {
   // Short, stable label for "which transport carried this" message
-  // metadata (see FederationBridge._pollOnce / MultiRelay.lastReadVia) —
+  // metadata (see VortexRelayBridge._pollOnce / MultiRelay.lastReadVia) —
   // every Relay implementation has one, even a fake used only in tests.
   name = 'memory';
 
@@ -60,7 +60,7 @@ export class InMemoryRelay {
  * Real relay backed by a GitHub Gist — the actual "internet in the
  * middle" for the live, cross-machine version of this PoC. Reads work
  * unauthenticated (fine for a public gist); writes need a token with the
- * `gist` scope. See docs/federation-poc.md for how to set one up and run
+ * `gist` scope. See docs/vortex-relay-poc.md for how to set one up and run
  * this for real between two machines.
  */
 export class GistRelay {
@@ -210,7 +210,7 @@ export class NostrRelay {
 
   // Memoized in-flight promise, not a synchronous null-check: bridge.js
   // fires publish and sync on independent timers (see
-  // FederationBridge.startDirectorySync), so two calls into a fresh
+  // VortexRelayBridge.startDirectorySync), so two calls into a fresh
   // NostrRelay can easily land before the first `await import(...)`
   // resolves — a bare `if (this._pool) return` lets both proceed, each
   // creating and assigning its own SimplePool, the second silently
@@ -324,7 +324,7 @@ export class MultiRelay {
     this._health = new Map(relays.map((r) => [r, { consecutiveFailures: 0, openUntil: 0 }]));
     // Which underlying relay actually served the MOST RECENT readFile /
     // writeFile+appendMessage — read immediately after the awaited call by
-    // FederationBridge (no other await happens in between, so nothing else
+    // VortexRelayBridge (no other await happens in between, so nothing else
     // can overwrite it first) to tag delivered messages with "how this
     // actually got here" (see docs request: transport as message
     // metadata). Not meaningful before the first call; null until then.

@@ -1,7 +1,7 @@
 // The federated agent directory: who exists, in which environment, and
 // what their scope is — built from each environment's own live roster
 // instead of a hand-maintained array (the known limitation flagged in
-// docs/federation-poc.md). Every environment publishes its own snapshot
+// docs/vortex-relay-poc.md). Every environment publishes its own snapshot
 // file on the relay (sole writer, so no read-modify-write race — same
 // rule GistRelay.appendMessage already relies on for outbox files) and
 // merges everyone else's snapshot to get the full picture. Works for any
@@ -14,7 +14,7 @@ function directoryFileFor(envName) {
 /**
  * Publish this environment's own agent roster to the relay. Call whenever
  * the local roster changes (an agent registers/unregisters) or on a
- * refresh interval — see FederationBridge.startDirectorySync.
+ * refresh interval — see VortexRelayBridge.startDirectorySync.
  * @param {import('./relay.js').Relay} relay
  * @param {string} envName
  * @param {Array<{agentName: string, scopeText: string}>} agents
@@ -37,27 +37,41 @@ export async function publishDirectory(relay, envName, agents) {
  * @param {import('./relay.js').Relay} relay
  * @param {string[]} envNames - every environment expected to publish a
  *   directory file, this one included
- * @returns {Promise<{entries: Array<{envName: string, agentName: string, scopeText: string}>, collisions: Map<string, string[]>}>}
+ * @returns {Promise<{entries: Array<{envName: string, agentName: string, scopeText: string}>, collisions: Map<string, string[]>, failures: string[]}>}
  *   `collisions` maps a bare agentName to the list of envNames that both
  *   claim it — same name, different environments, same as two colleagues
  *   who happen to share a job title on different machines (e.g. "System"
  *   on each Mac). Callers must not silently pick one; see
- *   resolveDirectoryName below.
+ *   resolveDirectoryName below. `failures` lists envNames whose directory
+ *   file THREW on read this call (every relay failed) — as opposed to an
+ *   envName simply missing from `envNames`, or one that read fine but
+ *   published an empty roster. Callers should treat a failure as "unknown
+ *   this cycle," not "this environment has no agents" (see
+ *   VortexRelayBridge.syncDirectory, which falls back to the previous
+ *   cycle's entries for a failed envName rather than dropping it).
  */
 export async function mergeDirectories(relay, envNames) {
   const entries = [];
   const byName = new Map();
+  const failures = [];
 
   for (const envName of envNames) {
     let snapshot;
     try {
       snapshot = await relay.readFile(directoryFileFor(envName));
     } catch (err) {
-      // Missing/unreadable is expected for an environment that hasn't
-      // published yet — degrade that one environment's reachability, not
-      // the whole merge. Still surfaced (not swallowed silently) so a real
-      // bug here doesn't look identical to "hasn't published yet".
-      console.warn(`[federation] could not read directory for ${envName}: ${err.message}`);
+      // A THROWN read (every configured relay failed this cycle — e.g. a
+      // simultaneous Gist rate-limit + Nostr timeout, seen live) is
+      // different from an environment that simply hasn't published yet:
+      // that case still degrades this one environment's reachability, not
+      // the whole merge, but the caller (VortexRelayBridge.syncDirectory)
+      // needs to know it happened so it can fall back to stale-but-present
+      // data instead of treating "couldn't read right now" as "this
+      // environment has no agents" — a vortex-relay-direct lookup landing in
+      // that window would otherwise get a false not-found even though
+      // nothing actually changed on the far side.
+      console.warn(`[vortex-relay] could not read directory for ${envName}: ${err.message}`);
+      failures.push(envName);
       continue;
     }
     const agents = Array.isArray(snapshot) ? snapshot : snapshot?.agents;
@@ -77,7 +91,7 @@ export async function mergeDirectories(relay, envNames) {
     if (envs.length > 1) collisions.set(name, envs);
   }
 
-  return { entries, collisions };
+  return { entries, collisions, failures };
 }
 
 /**

@@ -1,4 +1,4 @@
-// Text embeddings for the federation routing PoC (see
+// Text embeddings for the vortex-relay routing PoC (see
 // docs/future-las-agent-scope-router.md, section 1b — routing a message by
 // comparing it against agents' scope descriptors instead of a named
 // recipient).

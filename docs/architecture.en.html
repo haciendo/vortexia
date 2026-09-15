@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vortex-Relay</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+
+  :root {
+    --bg: #f4f6f5;
+    --surface: #ffffff;
+    --surface-2: #eaf0ee;
+    --border: #cfdad6;
+    --border-strong: #a9bcb6;
+    --text: #10201c;
+    --text-dim: #4d635c;
+    --text-faint: #7c928b;
+    --accent: #0f8b82;
+    --accent-soft: #d8efec;
+    --violet: #6a5acd;
+    --violet-soft: #e7e3fb;
+    --ok: #2f7d4f;
+    --ok-soft: #dcefe1;
+    --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+    --sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d1614;
+      --surface: #131f1c;
+      --surface-2: #182622;
+      --border: #24332f;
+      --border-strong: #37504a;
+      --text: #e7f1ee;
+      --text-dim: #9fb5ae;
+      --text-faint: #6c8781;
+      --accent: #4fd0c4;
+      --accent-soft: #163430;
+      --violet: #a79bef;
+      --violet-soft: #241f3d;
+      --ok: #7bd39b;
+      --ok-soft: #16302170;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0d1614;
+    --surface: #131f1c;
+    --surface-2: #182622;
+    --border: #24332f;
+    --border-strong: #37504a;
+    --text: #e7f1ee;
+    --text-dim: #9fb5ae;
+    --text-faint: #6c8781;
+    --accent: #4fd0c4;
+    --accent-soft: #163430;
+    --violet: #a79bef;
+    --violet-soft: #241f3d;
+    --ok: #7bd39b;
+    --ok-soft: #16302170;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.55;
+  }
+  ::selection { background: var(--accent-soft); color: var(--text); }
+
+  .wrap {
+    max-width: 780px;
+    margin: 0 auto;
+    padding-inline: 20px;
+    padding-block: 24px 96px;
+  }
+
+  .langbar {
+    display: flex;
+    justify-content: flex-end;
+    gap: 4px;
+    font-family: var(--mono);
+    font-size: 12px;
+    margin-bottom: 20px;
+  }
+  .langbar a {
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    color: var(--text-faint);
+    text-decoration: none;
+  }
+  .langbar a[aria-current="page"] {
+    color: var(--text);
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .langbar a:not([aria-current]):hover { border-color: var(--border-strong); color: var(--text); }
+
+  header.hero {
+    padding-block-end: 40px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 40px;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .eyebrow .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  h1 {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: clamp(28px, 5.2vw, 38px);
+    letter-spacing: -0.01em;
+    line-height: 1.15;
+    margin: 14px 0 12px;
+    text-wrap: balance;
+  }
+  .lede {
+    font-size: 17px;
+    color: var(--text-dim);
+    max-width: 62ch;
+    margin: 0;
+  }
+  .lede code { color: var(--text); }
+
+  h2 {
+    font-family: var(--mono);
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    margin: 0 0 6px;
+  }
+  h3 {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 20px;
+    margin: 0 0 8px;
+    letter-spacing: -0.005em;
+  }
+  section { margin-bottom: 52px; }
+  p { max-width: 66ch; color: var(--text); }
+  p.dim { color: var(--text-dim); }
+
+  code, .mono {
+    font-family: var(--mono);
+    font-size: 0.88em;
+  }
+  code {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.1em 0.4em;
+  }
+
+  figure { margin: 24px 0 0; }
+  .diagram-frame {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 14px;
+  }
+  svg { display: block; width: 100%; height: auto; color: var(--text); }
+  figcaption {
+    font-size: 13px;
+    color: var(--text-faint);
+    margin-top: 10px;
+    max-width: 66ch;
+  }
+
+  .kv {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 6px 18px;
+    font-family: var(--mono);
+    font-size: 13px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .kv dt { color: var(--text-faint); }
+  .kv dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+
+  .cardrow { display: flex; flex-wrap: wrap; gap: 14px; }
+  .timing {
+    flex: 1 1 200px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .timing .n {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 22px;
+    color: var(--accent);
+  }
+  .timing .label {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
+
+  .twocol {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 620px) { .twocol { grid-template-columns: 1fr; } }
+  .entity {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    border-top: 3px solid var(--accent);
+  }
+  .entity.domain { border-top-color: var(--violet); }
+  .entity .kicker {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .entity.domain .kicker { color: var(--violet); }
+  .entity h4 {
+    font-size: 16px;
+    margin: 4px 0 10px;
+    font-weight: 600;
+  }
+  .entity ul {
+    margin: 0;
+    padding-left: 0;
+    list-style: none;
+    font-size: 13.5px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .entity li { display: flex; gap: 8px; }
+  .entity li .k { font-family: var(--mono); color: var(--text-faint); flex: 0 0 auto; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13.5px;
+  }
+  th, td {
+    text-align: left;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    font-weight: 500;
+  }
+  td.mono { color: var(--text); }
+  .tablewrap {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+  }
+  .tablewrap table { min-width: 560px; }
+  .tablewrap th:first-child, .tablewrap td:first-child { padding-left: 16px; }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    font-size: 12.5px;
+    color: var(--text-faint);
+    font-family: var(--mono);
+  }
+
+  @media (max-width: 480px) {
+    .kv { grid-template-columns: 1fr; }
+    .kv dt { margin-top: 8px; }
+    .kv dt:first-child { margin-top: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <nav class="langbar" aria-label="Language">
+    <a href="architecture.en.html" aria-current="page">EN</a>
+    <a href="architecture.es.html">ES</a>
+  </nav>
+
+  <header class="hero">
+    <div class="eyebrow"><span class="dot"></span>vortexia · vortex-relay · v1</div>
+    <h1>Two brokers, one relay, no direct line</h1>
+    <p class="lede">
+      Every Mac in the society runs its own local <code>vortexia</code> MQTT broker.
+      Agents only ever talk to <em>their own</em> broker — the only thing that crosses
+      machines is small JSON files, written and read through a relay neither Mac
+      trusts the other to reach directly.
+    </p>
+  </header>
+
+  <section>
+    <h2>01 · Topology</h2>
+    <h3>Local broker, vortex-relay bridge, shared relay</h3>
+    <p class="dim">
+      <code>ba-mac</code> and <code>uy-mac</code> never open a socket to each other.
+      A <strong>VortexRelayBridge</strong> on each side is the only thing that reads or
+      writes the relay — local agents are unaware vortex-relay exists at all.
+    </p>
+    <figure>
+      <div class="diagram-frame">
+        <svg viewBox="0 0 720 400" role="img" aria-label="Two environments, ba-mac and uy-mac, each with local agents talking only to their own vortexia broker; the two brokers' vortex-relay bridges are the only components that read and write a shared relay layer, GitHub Gist and Nostr, between them.">
+          <defs>
+            <marker id="arrow-en" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor" />
+            </marker>
+          </defs>
+
+          <rect x="16" y="16" width="290" height="260" rx="10" fill="none" stroke="currentColor" stroke-opacity="0.35" />
+          <text x="34" y="40" font-family="IBM Plex Mono" font-size="12" letter-spacing="0.06em" fill="currentColor">BA-MAC</text>
+
+          <rect x="414" y="16" width="290" height="260" rx="10" fill="none" stroke="currentColor" stroke-opacity="0.35" />
+          <text x="432" y="40" font-family="IBM Plex Mono" font-size="12" letter-spacing="0.06em" fill="currentColor">UY-MAC</text>
+
+          <g font-family="IBM Plex Mono" font-size="11">
+            <rect x="34" y="58" width="90" height="28" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.6"/>
+            <text x="79" y="76" text-anchor="middle" fill="currentColor">Robotics</text>
+            <rect x="134" y="58" width="90" height="28" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.6"/>
+            <text x="179" y="76" text-anchor="middle" fill="currentColor">System</text>
+            <rect x="34" y="96" width="190" height="28" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.6"/>
+            <text x="129" y="114" text-anchor="middle" fill="currentColor">Vortexia · Garantido · ···</text>
+          </g>
+
+          <rect x="34" y="152" width="190" height="40" rx="8" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          <text x="129" y="172" text-anchor="middle" font-family="IBM Plex Mono" font-size="11" fill="currentColor">vortexia broker</text>
+          <text x="129" y="185" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="currentColor" fill-opacity="0.55">:9014 mqtt</text>
+
+          <line x1="129" y1="124" x2="129" y2="152" stroke="currentColor" stroke-opacity="0.6" marker-end="url(#arrow-en)"/>
+          <text x="140" y="142" font-family="IBM Plex Mono" font-size="9" fill="currentColor" fill-opacity="0.6">send() retained</text>
+
+          <rect x="34" y="216" width="190" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.4"/>
+          <text x="129" y="236" text-anchor="middle" font-family="IBM Plex Mono" font-size="11" fill="currentColor">ba-mac-gateway</text>
+          <text x="129" y="249" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="currentColor" fill-opacity="0.6">VortexRelayBridge</text>
+
+          <line x1="129" y1="192" x2="129" y2="216" stroke="currentColor" stroke-opacity="0.6" marker-end="url(#arrow-en)"/>
+
+          <g font-family="IBM Plex Mono" font-size="11">
+            <rect x="414" y="58" width="90" height="28" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.6"/>
+            <text x="459" y="76" text-anchor="middle" fill="currentColor">System</text>
+            <rect x="514" y="58" width="90" height="28" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.6"/>
+            <text x="559" y="76" text-anchor="middle" fill="currentColor">Forti</text>
+            <rect x="414" y="96" width="190" height="28" rx="6" fill="none" stroke="currentColor" stroke-opacity="0.6"/>
+            <text x="509" y="114" text-anchor="middle" fill="currentColor">Luganense · ···</text>
+          </g>
+
+          <rect x="414" y="152" width="190" height="40" rx="8" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          <text x="509" y="172" text-anchor="middle" font-family="IBM Plex Mono" font-size="11" fill="currentColor">vortexia broker</text>
+          <text x="509" y="185" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="currentColor" fill-opacity="0.55">:mqtt (own port)</text>
+
+          <line x1="509" y1="124" x2="509" y2="152" stroke="currentColor" stroke-opacity="0.6" marker-end="url(#arrow-en)"/>
+
+          <rect x="414" y="216" width="190" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.4"/>
+          <text x="509" y="236" text-anchor="middle" font-family="IBM Plex Mono" font-size="11" fill="currentColor">uy-mac-gateway</text>
+          <text x="509" y="249" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="currentColor" fill-opacity="0.6">VortexRelayBridge</text>
+
+          <line x1="509" y1="192" x2="509" y2="216" stroke="currentColor" stroke-opacity="0.6" marker-end="url(#arrow-en)"/>
+
+          <rect x="180" y="324" width="360" height="60" rx="10" fill="var(--surface-2)" stroke="currentColor" stroke-opacity="0.4"/>
+          <text x="360" y="348" text-anchor="middle" font-family="IBM Plex Mono" font-size="12" fill="currentColor" font-weight="600">MultiRelay</text>
+          <text x="360" y="365" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="currentColor" fill-opacity="0.65">GitHub Gist  +  Nostr relays</text>
+
+          <line x1="129" y1="256" x2="250" y2="324" stroke="currentColor" stroke-opacity="0.7" marker-end="url(#arrow-en)"/>
+          <line x1="360" y1="324" x2="129" y2="256" stroke="currentColor" stroke-opacity="0.35" stroke-dasharray="3 3"/>
+          <line x1="509" y1="256" x2="470" y2="324" stroke="currentColor" stroke-opacity="0.7" marker-end="url(#arrow-en)"/>
+          <line x1="360" y1="324" x2="509" y2="256" stroke="currentColor" stroke-opacity="0.35" stroke-dasharray="3 3"/>
+
+          <text x="360" y="308" text-anchor="middle" font-family="IBM Plex Mono" font-size="9.5" fill="currentColor" fill-opacity="0.6">write directory-&lt;env&gt;.json · inbox-&lt;env&gt;.json</text>
+        </svg>
+      </div>
+      <figcaption>
+        Local delivery (top) never leaves the broker: <code>agent.send()</code> publishes
+        retained MQTT, no relay involved. Only each side's <code>&lt;env&gt;-gateway</code>
+        client — the VortexRelayBridge — reads and writes the shared relay below it.
+      </figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>02 · Identification</h2>
+    <h3>Two entities, two structures</h3>
+    <p class="dim">
+      An agent is identified two independent ways, each answering a different
+      question and feeding a different routing mechanism. Neither substitutes
+      for the other.
+    </p>
+
+    <div class="twocol">
+      <div class="entity physical">
+        <div class="kicker">Entity 1 · physical</div>
+        <h4>Locator — where it runs</h4>
+        <ul>
+          <li><span class="k">envName</span> which machine — <code>ba-mac</code>, <code>uy-mac</code></li>
+          <li><span class="k">agentName</span> which agent there — <code>System</code></li>
+          <li><span class="k">key</span> <code>agentName@envName</code> — exact, single answer</li>
+        </ul>
+      </div>
+      <div class="entity domain">
+        <div class="kicker">Entity 2 · domain</div>
+        <h4>Scope ladder — what it's for</h4>
+        <ul>
+          <li><span class="k">rung 0</span> <code>name</code> — ≤34 chars, required</li>
+          <li><span class="k">rung 1</span> <code>short_description</code> — ≤55 chars</li>
+          <li><span class="k">rung 2</span> <code>long_description</code> — ≤89 chars</li>
+          <li><span class="k">rung 3+</span> <code>.vxia-scope.&lt;N&gt;.md</code> — 144, 233, 377…</li>
+          <li><span class="k">—</span> <code>README.md</code>, ranked by its own length</li>
+        </ul>
+      </div>
+    </div>
+
+    <figure>
+      <div class="diagram-frame">
+        <svg viewBox="0 0 720 250" role="img" aria-label="A directory entry pairs the physical locator, envName plus agentName, with one rung of the domain scope ladder as scopeText. Vortex-relay-direct addressing reads only the locator and resolves to exactly one match. Vortex-relay-intent broadcasting reads only the scope text, scores it against a free-text query, and can match zero, one, or several agents.">
+          <defs>
+            <marker id="arrow3-en" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor" />
+            </marker>
+          </defs>
+
+          <rect x="30" y="16" width="220" height="54" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+          <text x="140" y="38" text-anchor="middle" font-family="IBM Plex Mono" font-size="11" fill="currentColor">envName + agentName</text>
+          <text x="140" y="56" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="currentColor" fill-opacity="0.65">physical locator</text>
+
+          <rect x="470" y="16" width="220" height="54" rx="8" fill="var(--violet-soft)" stroke="var(--violet)"/>
+          <text x="580" y="38" text-anchor="middle" font-family="IBM Plex Mono" font-size="11" fill="currentColor">scopeText</text>
+          <text x="580" y="56" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="currentColor" fill-opacity="0.65">one rung of the ladder</text>
+
+          <line x1="140" y1="70" x2="270" y2="112" stroke="currentColor" stroke-opacity="0.6" marker-end="url(#arrow3-en)"/>
+          <line x1="580" y1="70" x2="450" y2="112" stroke="currentColor" stroke-opacity="0.6" marker-end="url(#arrow3-en)"/>
+
+          <rect x="270" y="112" width="180" height="46" rx="8" fill="var(--surface-2)" stroke="currentColor" stroke-opacity="0.4"/>
+          <text x="360" y="132" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="currentColor">directory-&lt;env&gt;.json</text>
+          <text x="360" y="147" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="currentColor" fill-opacity="0.6">{ envName, agentName, scopeText }</text>
+
+          <line x1="300" y1="158" x2="160" y2="200" stroke="currentColor" stroke-opacity="0.6" marker-end="url(#arrow3-en)"/>
+          <line x1="420" y1="158" x2="560" y2="200" stroke="currentColor" stroke-opacity="0.6" marker-end="url(#arrow3-en)"/>
+
+          <rect x="30" y="200" width="260" height="40" rx="8" fill="none" stroke="var(--accent)" stroke-width="1.4"/>
+          <text x="160" y="218" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="currentColor">vortex-relay-direct</text>
+          <text x="160" y="232" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="currentColor" fill-opacity="0.6">Name@env → exactly one, or not-found</text>
+
+          <rect x="430" y="200" width="260" height="40" rx="8" fill="none" stroke="var(--violet)" stroke-width="1.4"/>
+          <text x="560" y="218" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="currentColor">vortex-relay-intent</text>
+          <text x="560" y="232" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="currentColor" fill-opacity="0.6">free text → cosine match, 0..N agents</text>
+        </svg>
+      </div>
+      <figcaption>
+        A published directory entry always carries both fields, but each routing
+        path reads only one of them: <code>resolveDirectoryName()</code> never looks at
+        scope text, and <code>pickTargets()</code> never looks at the env/agent key.
+      </figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>03 · Routing</h2>
+    <h3>The address decides the path</h3>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Address</th><th>Identity used</th><th>Resolution</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">--to Robotics</td>
+            <td>local registry, no envName needed</td>
+            <td>direct MQTT publish on this broker</td>
+          </tr>
+          <tr>
+            <td class="mono">--to System@uy-mac</td>
+            <td>physical locator</td>
+            <td><code>resolveDirectoryName()</code> — exact match or not-found</td>
+          </tr>
+          <tr>
+            <td class="mono">--scope "facturacion"</td>
+            <td>domain scope text</td>
+            <td><code>pickTargets()</code> — similarity score, 0..N replies</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>04 · Directory</h2>
+    <h3>Built from what each environment says about itself</h3>
+    <p class="dim">
+      There's no central registry. Each environment periodically publishes both
+      entities for its own roster to the relay, and periodically reads every
+      environment's published snapshot back into one merged table — the only
+      thing either routing path ever consults.
+    </p>
+    <div class="cardrow">
+      <div class="timing">
+        <div class="n">300s</div>
+        <div class="label">publish own roster → <code>directory-&lt;env&gt;.json</code></div>
+      </div>
+      <div class="timing">
+        <div class="n">15s</div>
+        <div class="label">read every environment's directory → merged table</div>
+      </div>
+      <div class="timing">
+        <div class="n">1s</div>
+        <div class="label">poll own outbox for incoming routed messages</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>05 · Envelope reference</h2>
+    <h3>What actually crosses the wire</h3>
+    <dl class="kv">
+      <dt>topic</dt><dd>las/agent/&lt;name&gt;/inbox</dd>
+      <dt>local send</dt><dd>{ from, to, source, text, ts }  · retained</dd>
+      <dt>vortex-relay-direct</dt><dd>{ from, to: "Name" | "Name@env", source, text, kind: "vortex-relay-direct", ts }</dd>
+      <dt>vortex-relay-intent</dt><dd>{ from, intent, text, kind: "vortex-relay-intent", ts }</dd>
+      <dt>directory entry</dt><dd>{ envName, agentName, scopeText }</dd>
+      <dt>directory file</dt><dd>directory-&lt;env&gt;.json → { envName, agents: [{ agentName, scopeText }], updatedAt }</dd>
+      <dt>outbox file</dt><dd>inbox-&lt;env&gt;.json → appended { from, text, agentNames, routedFrom, ts }</dd>
+    </dl>
+  </section>
+
+  <footer>
+    vortexia · ~/Development/vortexia · vortex-relay module, first implementation
+  </footer>
+
+</div>
+</body>
+</html>

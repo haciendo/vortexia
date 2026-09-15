@@ -1,5 +1,5 @@
 // Same-LAN peer discovery via mDNS (Bonjour/Zeroconf) — the "both Macs are
-// on the same WiFi" case from docs/federation-poc.md's design discussion.
+// on the same WiFi" case from docs/vortex-relay-poc.md's design discussion.
 // No relay, no internet, no rate limits, sub-second latency: each vortexia
 // instance advertises itself, and discovers any sibling instance
 // advertising the same service type on the local network automatically.
@@ -10,7 +10,7 @@
 // connection to their broker, bypassing the Relay/mailbox model in
 // relay.js entirely (no store-and-forward needed when both sides are
 // live on the same network right now). Wiring that direct connection into
-// FederationBridge is the next step — see docs/federation-poc.md.
+// VortexRelayBridge is the next step — see docs/vortex-relay-poc.md.
 //
 // NOTE: same-host discovery (advertise and discover from the same
 // process/machine) is used here only to prove the advertise/parse code

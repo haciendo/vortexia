@@ -110,15 +110,15 @@ scope-reply" section for the message shape.
 convention in `docs/vxia-scope-ladder.md` — this is the piece a consumer's
 `onScopeQuery` handler would use to answer queries about files on disk.
 
-## Federation PoC
+## vortex-relay PoC
 
 Two or more environments (possibly on different machines) can join into
 one logical network with no shared broker, routing messages by matching
 intent against agents' scope descriptors instead of a named recipient —
-see [docs/federation-poc.md](./docs/federation-poc.md) for how to run it,
+see [docs/vortex-relay-poc.md](./docs/vortex-relay-poc.md) for how to run it,
 including across a real Mac/Windows pair over a shared GitHub Gist.
 Requires Node ≥18 (uses the global `fetch`) — no native/platform-specific
-dependencies, so the same `scripts/federation-demo.js` runs unmodified on
+dependencies, so the same `scripts/vortex-relay-demo.js` runs unmodified on
 macOS, Linux, or Windows.
 
 ## Tests

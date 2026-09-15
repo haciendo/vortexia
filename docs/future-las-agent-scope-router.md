@@ -118,7 +118,7 @@ the same request/reply shape — but ports are already served by
 truth. Don't duplicate the registry; decide whether vortexia should proxy it
 or leave it to the HTTP API.
 
-## 4. Cross-machine queue federation (star topology)
+## 4. Cross-machine queue vortex-relay (star topology)
 
 Longer-term: connect this machine's vortexia broker to another machine's,
 so agents on different machines can message each other — a star topology
@@ -127,9 +127,9 @@ rather than one giant shared broker. Not designed yet beyond the shape of
 the idea. This is squarely vortexia's own scope (per its README, "not yet
 wired into local-agent-society's backend... that integration is a later
 phase") — the scope-ladder query protocol in section 1 should probably be
-designed to work transparently across that federation once it exists (i.e.
+designed to work transparently across vortex-relay once it exists (i.e.
 a scope-query shouldn't care whether the target agent is local or on another
-machine's broker), but federation itself is a separate, larger piece of work
+machine's broker), but vortex-relay itself is a separate, larger piece of work
 than anything else in this file.
 
 ## Suggested order, whenever someone picks this up

@@ -6,9 +6,9 @@ import { startBroker } from './broker.js';
 import { scanScopes } from './scope.js';
 import { logger } from './logger.js';
 import { VortexiaClient } from './client.js';
-import { FederationBridge } from './federation/bridge.js';
-import { GistRelay, NostrRelay, MultiRelay } from './federation/relay.js';
-import { discoverLocalRoster } from './federation/localRoster.js';
+import { VortexRelayBridge } from './vortex-relay/bridge.js';
+import { GistRelay, NostrRelay, MultiRelay } from './vortex-relay/relay.js';
+import { discoverLocalRoster } from './vortex-relay/localRoster.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -43,12 +43,12 @@ function readPortFile() {
 }
 
 /**
- * Federation is opt-in: only starts if VORTEXIA_ENV_NAME and at least one
+ * vortex-relay is opt-in: only starts if VORTEXIA_ENV_NAME and at least one
  * transport is configured (VORTEXIA_GIST_ID and/or
  * VORTEXIA_NOSTR_SECRET_KEY). An instance with neither (the common case —
- * a single-Mac society) runs exactly as before. See docs/federation-poc.md
+ * a single-Mac society) runs exactly as before. See docs/vortex-relay-poc.md
  * for how to provision a Gist/token or a Nostr key, and
- * VORTEXIA_FEDERATION_ENV_NAMES (comma-separated) to list every
+ * VORTEXIA_RELAY_ENV_NAMES (comma-separated) to list every
  * environment expected to publish to the shared directory — this
  * environment's own name is added automatically if omitted.
  *
@@ -60,13 +60,13 @@ function readPortFile() {
  * identity, not a shared secret like the Gist token; losing it only lets
  * someone impersonate THIS environment's writes.
  */
-async function startFederation(mqttPort) {
+async function startVortexRelay(mqttPort) {
   const envName = process.env.VORTEXIA_ENV_NAME;
   const gistId = process.env.VORTEXIA_GIST_ID;
   const nostrSecretHex = process.env.VORTEXIA_NOSTR_SECRET_KEY;
   if (!envName || (!gistId && !nostrSecretHex)) return null;
 
-  const envNames = (process.env.VORTEXIA_FEDERATION_ENV_NAMES || envName)
+  const envNames = (process.env.VORTEXIA_RELAY_ENV_NAMES || envName)
     .split(',').map((s) => s.trim()).filter(Boolean);
   if (!envNames.includes(envName)) envNames.push(envName);
 
@@ -94,7 +94,7 @@ async function startFederation(mqttPort) {
   const gateway = new VortexiaClient({ port: mqttPort });
   await gateway.register(`${envName}-gateway`);
 
-  const bridge = new FederationBridge({ envName, relay, envNames }).attach(gateway);
+  const bridge = new VortexRelayBridge({ envName, relay, envNames }).attach(gateway);
   const roster = await discoverLocalRoster();
   // See bridge.js's startDirectorySync doc comment: publish (a Gist write)
   // hits GitHub's 100/hour gist_update secondary limit shared across every
@@ -103,7 +103,7 @@ async function startFederation(mqttPort) {
   bridge.startDirectorySync(roster, { publishIntervalMs: 300000, syncIntervalMs: 15000 });
   bridge.startPolling(1000);
 
-  logger.info(`[vortexia] federation enabled: env=${envName}, envNames=[${envNames.join(', ')}], local roster=${roster.length} agent(s)`);
+  logger.info(`[vortexia] vortex-relay enabled: env=${envName}, envNames=[${envNames.join(', ')}], local roster=${roster.length} agent(s)`);
   return { bridge, gateway };
 }
 
@@ -123,18 +123,18 @@ async function cmdStart() {
   logger.info(`  MQTT (TCP):     localhost:${mqttPort}`);
   logger.info(`  MQTT (WebSocket): localhost:${wsPort}`);
 
-  const federation = await startFederation(mqttPort).catch((err) => {
-    logger.error(`[vortexia] federation failed to start: ${err.message}`);
+  const vortexRelay = await startVortexRelay(mqttPort).catch((err) => {
+    logger.error(`[vortexia] vortex-relay failed to start: ${err.message}`);
     return null;
   });
 
   const shutdown = async (signal) => {
     logger.info(`vortexia: received ${signal}, shutting down...`);
     try {
-      if (federation) {
-        federation.bridge.stopPolling();
-        federation.bridge.stopDirectorySync();
-        await federation.gateway.close();
+      if (vortexRelay) {
+        vortexRelay.bridge.stopPolling();
+        vortexRelay.bridge.stopDirectorySync();
+        await vortexRelay.gateway.close();
       }
       await close();
     } finally {

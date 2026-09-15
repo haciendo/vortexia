@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pickTargets } from '../src/federation/router.js';
-import { bagOfWordsEmbedder, cosineSimilarity, resolveEmbedder, ollamaEmbedder } from '../src/federation/embeddings.js';
+import { pickTargets } from '../src/vortex-relay/router.js';
+import { bagOfWordsEmbedder, cosineSimilarity, resolveEmbedder, ollamaEmbedder } from '../src/vortex-relay/embeddings.js';
 
-// Three simulated environments, one agent each — mirrors the federation PoC:
+// Three simulated environments, one agent each — mirrors the vortex-relay PoC:
 // weather-ish agents in A and C should both match a weather intent, while
 // the billing agent in B should be the sole match for a billing intent.
 // Bag-of-words has no stemming — it only sees shared literal tokens, not
