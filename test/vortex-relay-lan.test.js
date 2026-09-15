@@ -9,6 +9,13 @@ import { LanDiscovery } from '../src/vortex-relay/lanDiscovery.js';
 // if this environment doesn't support multicast at all (e.g. a sandboxed
 // CI runner with no real network interface), same posture as
 // broker.test.js's Ollama-dependent test.
+//
+// onUp must filter for THIS test's own envName, not resolve on the first
+// peer seen: a real vortexia instance (bridge.js's attachLanDiscovery) may
+// legitimately be advertising on the same LAN/host while this test runs —
+// found live, once LAN discovery actually shipped in production, as a
+// flaky failure where the watcher resolved with the real "ba-mac" service
+// instead of this test's synthetic advertiser.
 
 test('LanDiscovery: one instance discovers another advertising on the same host', async (t) => {
   const envName = `lan-test-${Date.now()}`;
@@ -24,7 +31,7 @@ test('LanDiscovery: one instance discovers another advertising on the same host'
 
   try {
     const found = await new Promise((resolve, reject) => {
-      watcher.discover({ onUp: resolve }).catch(reject);
+      watcher.discover({ onUp: (peer) => { if (peer.envName === envName) resolve(peer); } }).catch(reject);
       setTimeout(() => resolve(null), 6000);
     });
 

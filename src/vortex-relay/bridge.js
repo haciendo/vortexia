@@ -117,10 +117,15 @@ export class VortexRelayBridge {
         this.attachDirectTransport(
           peer.envName,
           new DirectMqttTransport({ envName: peer.envName, host: peer.host, mqttPort: peer.mqttPort, ...(ClientImpl ? { ClientImpl } : {}) }),
-        ).catch((err) => console.error(`[vortex-relay:${this.envName}] direct transport to ${peer.envName} failed to connect:`, err));
+        ).then(
+          () => console.log(`[vortex-relay:${this.envName}] LAN direct connection to ${peer.envName} established (${peer.host}:${peer.mqttPort})`),
+          (err) => console.error(`[vortex-relay:${this.envName}] direct transport to ${peer.envName} failed to connect:`, err),
+        );
       },
       onDown: (envName) => {
-        this.detachDirectTransport(envName).catch((err) => console.error(`[vortex-relay:${this.envName}] direct transport to ${envName} failed to disconnect cleanly:`, err));
+        this.detachDirectTransport(envName)
+          .then(() => console.log(`[vortex-relay:${this.envName}] LAN direct connection to ${envName} closed (peer left the network)`))
+          .catch((err) => console.error(`[vortex-relay:${this.envName}] direct transport to ${envName} failed to disconnect cleanly:`, err));
       },
     });
     return this;
