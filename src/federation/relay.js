@@ -4,7 +4,8 @@
 // FederationBridge (bridge.js) only depends on this shape, not on Gists
 // specifically, so the transport can be swapped later (see
 // docs/future-las-agent-scope-router.md section 4, cross-machine
-// federation) without touching routing logic.
+// federation) without touching routing logic. See also MultiRelay below,
+// for combining several of these with automatic fallback.
 //
 // Each environment owns exactly one file (its "inbox from the federation")
 // and is the ONLY writer to it — every other environment only reads it.
@@ -114,5 +115,165 @@ export class GistRelay {
     });
     if (!res.ok) throw new Error(`GistRelay: write failed with ${res.status}`);
     return data;
+  }
+}
+
+// Default public relays for NostrRelay — well-established, free, no
+// account/API key needed. Override via the `relays` option for a private
+// or self-hosted set.
+const DEFAULT_NOSTR_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band'];
+
+// NIP-78 "application-specific data": a parameterized-replaceable event
+// (last publish with the same `d` tag WINS, older ones are dropped by the
+// relay) — exact match for a directory snapshot file's single-owner,
+// last-writer-wins semantics (see publishDirectory in directory.js).
+const SNAPSHOT_KIND = 30078;
+
+// A plain custom "regular" kind (stored and replayable, unlike the
+// 20000-29999 "ephemeral" range which relays don't persist) — every
+// publish is its OWN event, never replaced. Filtering by the `d` tag
+// across every event of this kind gives exactly an append-only log, i.e.
+// an outbox file — and unlike GistRelay.appendMessage, there is no
+// read-modify-write: each append is a single independent publish, so two
+// environments (or two processes) appending at "the same time" can never
+// race or clobber each other.
+const LOG_KIND = 7878;
+
+/**
+ * Real relay backed by the Nostr network — a set of independent, free,
+ * publicly-run relays (see DEFAULT_NOSTR_RELAYS) built specifically for
+ * this "publish small signed events, anyone can subscribe" pattern. Unlike
+ * GistRelay, this isn't fighting the transport's own design: no
+ * GitHub-specific secondary rate limit (gist_update, 100/hour shared
+ * across every writer on a token), no read-modify-write race on appends,
+ * and every event is signed by this environment's own key instead of
+ * everyone sharing one bearer token that can write (or impersonate)
+ * anything. querySync/publish talk to every configured relay at once and
+ * de-duplicate/return-on-first-success — one relay being down or slow
+ * doesn't block delivery as long as at least one of the others is up.
+ *
+ * Trust model: `secretKey` is this environment's own identity, not a
+ * shared secret — losing it only lets someone impersonate THIS
+ * environment's writes, not every environment's, unlike a shared Gist
+ * token. Keep it as private as the Gist token was.
+ */
+export class NostrRelay {
+  constructor({ secretKey, relays = DEFAULT_NOSTR_RELAYS, queryTimeoutMs = 5000 } = {}) {
+    if (!secretKey) throw new Error('NostrRelay requires a secretKey (see nostr-tools generateSecretKey())');
+    this.secretKey = secretKey;
+    this.relayUrls = relays;
+    this.queryTimeoutMs = queryTimeoutMs;
+    this._pool = null;
+    this._pubkey = null;
+  }
+
+  async _ensure() {
+    if (this._pool) return;
+    const { SimplePool, getPublicKey } = await import('nostr-tools');
+    this._pool = new SimplePool();
+    this._pubkey = getPublicKey(this.secretKey);
+  }
+
+  async _publish(event) {
+    await this._ensure();
+    const results = await Promise.allSettled(this._pool.publish(this.relayUrls, event));
+    if (!results.some((r) => r.status === 'fulfilled')) {
+      throw new Error(`NostrRelay: publish to ${this.relayUrls.join(', ')} failed on every relay`);
+    }
+  }
+
+  async readFile(filename) {
+    await this._ensure();
+    const events = await this._pool.querySync(
+      this.relayUrls,
+      { kinds: [SNAPSHOT_KIND, LOG_KIND], authors: [this._pubkey], '#d': [filename] },
+      { maxWait: this.queryTimeoutMs },
+    );
+
+    const snapshot = events.find((e) => e.kind === SNAPSHOT_KIND);
+    if (snapshot) return JSON.parse(snapshot.content);
+
+    return events
+      .filter((e) => e.kind === LOG_KIND)
+      .sort((a, b) => a.created_at - b.created_at)
+      .map((e) => JSON.parse(e.content));
+  }
+
+  async appendMessage(filename, message) {
+    const { finalizeEvent } = await import('nostr-tools');
+    await this._ensure();
+    const event = finalizeEvent(
+      { kind: LOG_KIND, created_at: Math.floor(Date.now() / 1000), tags: [['d', filename]], content: JSON.stringify(message) },
+      this.secretKey,
+    );
+    await this._publish(event);
+    return this.readFile(filename);
+  }
+
+  async writeFile(filename, data) {
+    const { finalizeEvent } = await import('nostr-tools');
+    await this._ensure();
+    const event = finalizeEvent(
+      { kind: SNAPSHOT_KIND, created_at: Math.floor(Date.now() / 1000), tags: [['d', filename]], content: JSON.stringify(data) },
+      this.secretKey,
+    );
+    await this._publish(event);
+    return data;
+  }
+
+  close() {
+    this._pool?.destroy();
+    this._pool = null;
+  }
+}
+
+/**
+ * Combines several Relay implementations with automatic fallback — "buscar
+ * por varios conectores, usar el más veloz, fallback si falla uno." Reads
+ * race every relay and return the first successful, non-empty result
+ * (falling through to the next relay on error, and treating an empty
+ * result as "keep trying the rest" since a relay that's merely behind on
+ * propagation shouldn't look identical to real data). Writes fan out to
+ * EVERY relay in parallel — a write should land wherever it can, not just
+ * the fastest one, since a reader might only be listening on a relay that
+ * wasn't first. A write only fails if every relay's write failed.
+ */
+export class MultiRelay {
+  constructor(relays) {
+    if (!relays?.length) throw new Error('MultiRelay requires at least one relay');
+    this.relays = relays;
+  }
+
+  async readFile(filename) {
+    let lastErr;
+    for (const relay of this.relays) {
+      try {
+        const result = await relay.readFile(filename);
+        const isEmpty = Array.isArray(result) ? result.length === 0 : result == null;
+        if (!isEmpty) return result;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (lastErr) throw lastErr;
+    return [];
+  }
+
+  async appendMessage(filename, message) {
+    const results = await Promise.allSettled(this.relays.map((r) => r.appendMessage(filename, message)));
+    const fulfilled = results.find((r) => r.status === 'fulfilled');
+    if (!fulfilled) throw results[0].reason;
+    return fulfilled.value;
+  }
+
+  async writeFile(filename, data) {
+    const results = await Promise.allSettled(this.relays.map((r) => r.writeFile(filename, data)));
+    const fulfilled = results.find((r) => r.status === 'fulfilled');
+    if (!fulfilled) throw results[0].reason;
+    return data;
+  }
+
+  close() {
+    for (const relay of this.relays) relay.close?.();
   }
 }
