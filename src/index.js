@@ -54,9 +54,11 @@ function readPortFile() {
  * environment's own name is added automatically if omitted.
  *
  * When more than one transport is configured, they're combined via
- * MultiRelay (see relay.js): reads race all of them, writes fan out to
- * all of them, and one transport being down/rate-limited doesn't block
- * the other. VORTEXIA_NOSTR_SECRET_KEY is hex-encoded (see nostr-tools
+ * MultiRelay (see relay.js): per-message writes chain in priority order
+ * (cheapest/most-reliable first, Gist last) with automatic fallback and a
+ * circuit breaker, reads merge whatever every live transport has, and one
+ * transport being down/rate-limited doesn't block the other.
+ * VORTEXIA_NOSTR_SECRET_KEY is hex-encoded (see nostr-tools
  * generateSecretKey/bytesToHex) — it's this environment's own signing
  * identity, not a shared secret like the Gist token; losing it only lets
  * someone impersonate THIS environment's writes.
@@ -94,8 +96,12 @@ async function startVortexRelay(mqttPort, wsPort) {
     .split(',').map((s) => s.trim()).filter(Boolean);
   if (!envNames.includes(envName)) envNames.push(envName);
 
+  // Order here is MultiRelay's chain priority for appendMessage (see
+  // relay.js) — cheapest/most-reliable first. Nostr has no shared-token
+  // rate limit and no read-modify-write race; Gist does (100/hour
+  // gist_update, shared across every writer on the token), so it goes
+  // last, tried only once Nostr's circuit is actually open or missing.
   const transports = [];
-  if (gistId) transports.push(new GistRelay({ gistId, token: process.env.VORTEXIA_GIST_TOKEN }));
   let nostrRelay = null;
   if (nostrSecretHex) {
     // VORTEXIA_NOSTR_PEERS: "envName:pubkeyHex,envName2:pubkeyHex2" —
@@ -111,6 +117,7 @@ async function startVortexRelay(mqttPort, wsPort) {
     nostrRelay = new NostrRelay({ secretKey: Buffer.from(nostrSecretHex, 'hex'), knownPeerPubkeys });
     transports.push(nostrRelay);
   }
+  if (gistId) transports.push(new GistRelay({ gistId, token: process.env.VORTEXIA_GIST_TOKEN }));
   const relay = transports.length > 1 ? new MultiRelay(transports) : transports[0];
   if (nostrRelay) {
     logger.info(`[vortexia] Nostr identity pubkey (share this for peers to trust ${envName}): ${await nostrRelay.publicKeyHex()}`);

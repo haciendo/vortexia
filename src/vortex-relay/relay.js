@@ -290,28 +290,46 @@ export class NostrRelay {
 
 /**
  * Combines several Relay implementations with automatic fallback — "buscar
- * por varios conectores, usar el más veloz, fallback si falla uno." Reads
- * race every relay and return the first successful, non-empty result
- * (falling through to the next relay on error, and treating an empty
- * result as "keep trying the rest" since a relay that's merely behind on
- * propagation shouldn't look identical to real data). Writes fan out to
- * EVERY relay in parallel — a write should land wherever it can, not just
- * the fastest one, since a reader might only be listening on a relay that
- * wasn't first. A write only fails if every relay's write failed.
+ * por varios conectores, usar el más veloz, fallback si falla uno."
+ *
+ * appendMessage (the per-message outbox write, on the hot path — every
+ * routed message, every poll) is a genuine CHAIN, same shape as
+ * ConnectionRouter one level up: try relays in order (constructor order =
+ * priority — cheapest/most-reliable first), stop at the first success, and
+ * SKIP a circuit-open relay entirely rather than paying for a request
+ * that's very likely to fail again. Found live: fanning every append out to
+ * every relay in parallel meant a Gist token stuck at 403 got hit on every
+ * single message even once Nostr alone was carrying traffic fine — this is
+ * the fix. A relay is only ever fully passed over if every OTHER relay
+ * failed too (a message should never be silently dropped just because
+ * every relay happened to be in cooldown at once — see the second pass
+ * below).
+ *
+ * Because appendMessage no longer guarantees every relay ends up with the
+ * same log, readFile can't just return the first non-empty result anymore
+ * (a later message chained to a different relay than an earlier one would
+ * go missing). Instead it fetches from every non-open relay in parallel and
+ * MERGES: log-shaped (array) results are unioned and deduped; snapshot-
+ * shaped (object, e.g. a directory file) results resolve to whichever has
+ * the newest `updatedAt`.
+ *
+ * writeFile (full-replace snapshot writes — directory publish only, every
+ * ~5min, not the hot path) still fans out to every relay: it's cheap at
+ * that cadence, and mirroring the snapshot everywhere means any relay a
+ * peer happens to be reading from has it, without leaning on readFile's
+ * merge to reconstruct anything.
  *
  * Circuit breaker, per relay: a relay that fails `failureThreshold` times
- * in a row is marked "open" — every read/write moves it to the END of the
- * attempt order (and reads skip it outright) for `cooldownMs`, instead of
- * every single call wasting a round-trip attempting a transport that's
- * been failing for the last hour. It's never permanently excluded: after
- * the cooldown, the next call tries it again (a real request, not a
- * side-channel health check) — success closes the circuit and resets it
- * to normal priority, another failure reopens it for another cooldown.
- * This is what makes "chain multiple transports, fall back automatically"
- * actually automatic — found live: without this, degrading Gist required
- * a human/agent to manually tell the OTHER environment to drop it from
- * config, because every call kept retrying it first no matter how long
- * it had been down.
+ * in a row is marked "open" for `cooldownMs`, instead of every single call
+ * wasting a round-trip attempting a transport that's been failing for the
+ * last hour. It's never permanently excluded: after the cooldown, the next
+ * call tries it again (a real request, not a side-channel health check) —
+ * success closes the circuit and resets it to normal priority, another
+ * failure reopens it for another cooldown. This is what makes "chain
+ * multiple transports, fall back automatically" actually automatic — found
+ * live: without this, degrading Gist required a human/agent to manually
+ * tell the OTHER environment to drop it from config, because every call
+ * kept retrying it first no matter how long it had been down.
  */
 export class MultiRelay {
   name = 'multi';
@@ -363,50 +381,91 @@ export class MultiRelay {
   }
 
   async readFile(filename) {
-    let lastErr;
-    // "Every relay failed" must mean every relay actually THREW — a later
-    // relay succeeding with a legitimately empty result (nothing published
-    // there yet) is a real, valid answer and must not be masked by an
-    // earlier, unrelated relay's error. Found live: Gist 403'd (rate
-    // limited) while Nostr correctly had nothing yet for a brand new file —
-    // without tracking success separately from emptiness, that re-threw
-    // the Gist error instead of returning the true (empty) result.
-    let sawSuccess = false;
-    let lastSuccessRelay = null;
-    // Skip open (recently-failing) relays entirely for reads — unlike
-    // writes, a read only needs ONE good answer, so there's no benefit to
+    // Skip open (recently-failing) relays entirely — a read only needs
+    // good answers from whatever's actually up, so there's no benefit to
     // burning time on a relay that's very likely still down; it still
     // gets retried once its cooldown elapses.
-    for (const relay of this._orderedRelays()) {
-      if (this._isOpen(relay)) continue;
-      try {
-        const result = await relay.readFile(filename);
-        this._recordSuccess(relay);
-        sawSuccess = true;
-        lastSuccessRelay = relay;
-        const isEmpty = Array.isArray(result) ? result.length === 0 : result == null;
-        if (!isEmpty) {
-          this.lastReadVia = relay.name;
-          return result;
-        }
-      } catch (err) {
-        this._recordFailure(relay);
-        lastErr = err;
+    const candidates = this._orderedRelays().filter((r) => !this._isOpen(r));
+    const settled = await Promise.allSettled(candidates.map((r) => r.readFile(filename)));
+
+    let lastErr;
+    const successes = [];
+    settled.forEach((s, i) => {
+      if (s.status === 'fulfilled') {
+        this._recordSuccess(candidates[i]);
+        successes.push({ relay: candidates[i], result: s.value });
+      } else {
+        this._recordFailure(candidates[i]);
+        lastErr = s.reason;
       }
+    });
+
+    // "Every relay failed" must mean every relay actually THREW — found
+    // live: Gist 403'd (rate limited) while Nostr correctly had nothing yet
+    // for a brand new file (a real, valid empty result, not an error).
+    if (!successes.length) {
+      if (lastErr) throw lastErr;
+      this.lastReadVia = null;
+      return [];
     }
-    if (!sawSuccess && lastErr) throw lastErr;
-    this.lastReadVia = lastSuccessRelay?.name ?? null;
-    return [];
+    this.lastReadVia = successes.map((s) => s.relay.name).join('+');
+
+    const results = successes.map((s) => s.result);
+    if (results.every((r) => Array.isArray(r))) {
+      // Log-shaped: appendMessage now chains rather than fanning out (see
+      // class doc), so different messages can legitimately live on
+      // different relays — union them all, deduped, oldest first.
+      const merged = results.flat();
+      merged.sort((a, b) => (a?.ts ?? 0) - (b?.ts ?? 0));
+      const seen = new Set();
+      return merged.filter((m) => {
+        const key = JSON.stringify(m);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
+    // Snapshot-shaped (e.g. a directory file): writeFile still fans out to
+    // every relay, so these should usually agree — but pick the newest by
+    // `updatedAt` rather than an arbitrary relay, just in case one lagged.
+    const withUpdatedAt = results.filter((r) => r && typeof r === 'object' && !Array.isArray(r) && typeof r.updatedAt === 'number');
+    if (withUpdatedAt.length) {
+      return withUpdatedAt.reduce((latest, r) => (r.updatedAt > latest.updatedAt ? r : latest));
+    }
+    return results.find((r) => r != null) ?? results[0];
   }
 
   async appendMessage(filename, message) {
-    const ordered = this._orderedRelays();
-    const results = await Promise.allSettled(ordered.map((r) => r.appendMessage(filename, message)));
-    results.forEach((r, i) => (r.status === 'fulfilled' ? this._recordSuccess(ordered[i]) : this._recordFailure(ordered[i])));
-    const index = results.findIndex((r) => r.status === 'fulfilled');
-    if (index === -1) throw this._aggregateError(results);
-    this.lastWriteVia = ordered[index].name;
-    return results[index].value;
+    // First pass: only relays that aren't circuit-open, in priority order —
+    // stop at the first success (see class doc: this is a chain, not a
+    // fan-out). Second pass, only reached if that whole pass failed (or
+    // every relay is currently open): try the open ones too — a message
+    // should never be silently dropped just because every relay happened
+    // to be in cooldown at once.
+    let attempt = await this._tryAppend(filename, message, (r) => !this._isOpen(r));
+    if (!attempt.ok) attempt = await this._tryAppend(filename, message, (r) => this._isOpen(r));
+    if (!attempt.ok) throw attempt.err ?? new Error(`MultiRelay: no relay available for "${filename}"`);
+    return attempt.result;
+  }
+
+  // Tries each relay matching `predicate`, in priority order, stopping at
+  // the first success.
+  async _tryAppend(filename, message, predicate) {
+    let err;
+    for (const relay of this._orderedRelays()) {
+      if (!predicate(relay)) continue;
+      try {
+        const result = await relay.appendMessage(filename, message);
+        this._recordSuccess(relay);
+        this.lastWriteVia = relay.name;
+        return { ok: true, result };
+      } catch (e) {
+        this._recordFailure(relay);
+        err = e;
+      }
+    }
+    return { ok: false, err };
   }
 
   async writeFile(filename, data) {

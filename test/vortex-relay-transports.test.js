@@ -80,12 +80,70 @@ test('MultiRelay.writeFile: throws only when every relay fails', async () => {
   await assert.rejects(() => multi.writeFile('x.json', {}), /always fails/);
 });
 
-test('MultiRelay.appendMessage: fans out to every relay, succeeds if at least one does', async () => {
+test('MultiRelay.appendMessage: chains — falls through to the next relay when an earlier one fails', async () => {
   const good = new InMemoryRelay();
   const multi = new MultiRelay([new FailingRelay(), good]);
 
   await multi.appendMessage('inbox-env-b.json', { text: 'hi' });
   assert.deepEqual(await good.readFile('inbox-env-b.json'), [{ text: 'hi' }]);
+  assert.equal(multi.lastWriteVia, good.name, 'only the relay that actually succeeded should be reported');
+});
+
+test('MultiRelay.appendMessage: stops at the first success, never calls a later relay too', async () => {
+  const first = new InMemoryRelay();
+  let secondCalls = 0;
+  const second = { name: 'second', async appendMessage() { secondCalls++; return []; } };
+  const multi = new MultiRelay([first, second]);
+
+  await multi.appendMessage('inbox-env-b.json', { text: 'hi' });
+  assert.equal(secondCalls, 0, 'a chain must not fan out once an earlier relay already succeeded');
+});
+
+test('MultiRelay.appendMessage: skips a circuit-open relay on later calls, not retried every time', async () => {
+  const flaky = new CountingRelay('flaky'); // always fails
+  const good = new InMemoryRelay();
+  const multi = new MultiRelay([flaky, good], { failureThreshold: 2, cooldownMs: 60000 });
+
+  await multi.appendMessage('inbox-env-b.json', { text: 'a' }); // flaky fails (1), good succeeds
+  await multi.appendMessage('inbox-env-b.json', { text: 'b' }); // flaky fails (2) -> circuit opens; good succeeds
+  assert.equal(flaky.calls, 2);
+
+  await multi.appendMessage('inbox-env-b.json', { text: 'c' }); // circuit open -> flaky must be SKIPPED entirely
+  assert.equal(flaky.calls, 2, 'an open circuit must not be attempted again before its cooldown elapses');
+  assert.deepEqual((await good.readFile('inbox-env-b.json')).map((m) => m.text), ['a', 'b', 'c']);
+});
+
+test('MultiRelay.appendMessage: retries an open relay as a last resort rather than dropping the message', async () => {
+  // With only one relay and threshold 1, its very first failure opens its
+  // own circuit mid-call — the second pass immediately retries it (nothing
+  // else to fall back to), so a single call can attempt twice.
+  const onlyOne = new CountingRelay('only', { failUntilCall: 2 }); // fails first two calls, then works
+  const multi = new MultiRelay([onlyOne], { failureThreshold: 1, cooldownMs: 60000 });
+
+  // First appendMessage: attempt #1 fails (opens the circuit), the
+  // same-call second pass retries as attempt #2 — also still within
+  // failUntilCall, so it fails too.
+  await assert.rejects(() => multi.appendMessage('x.json', { text: 'first' }));
+  assert.equal(onlyOne.calls, 2);
+
+  // Second appendMessage: the relay is circuit-open and its cooldown
+  // hasn't elapsed — pass one has nothing to try, so pass two retries it
+  // anyway rather than refusing the write outright. Attempt #3 is past
+  // failUntilCall, so it succeeds.
+  const result = await multi.appendMessage('x.json', { text: 'second' });
+  assert.deepEqual(result, {});
+  assert.equal(onlyOne.calls, 3);
+});
+
+test('MultiRelay.readFile: merges messages that ended up split across different relays', async () => {
+  const a = new InMemoryRelay();
+  const b = new InMemoryRelay();
+  await a.appendMessage('inbox-env-b.json', { text: 'first', ts: 1 });
+  await b.appendMessage('inbox-env-b.json', { text: 'second', ts: 2 });
+  const multi = new MultiRelay([a, b]);
+
+  const result = await multi.readFile('inbox-env-b.json');
+  assert.deepEqual(result.map((m) => m.text), ['first', 'second']);
 });
 
 // Real network tests against live public Nostr relays — opt-in only
