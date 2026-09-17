@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import './env.js'; // must load first — see env.js's doc comment
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -90,7 +91,14 @@ async function startVortexRelay(mqttPort, wsPort) {
   const envName = process.env.VORTEXIA_ENV_NAME;
   const gistId = process.env.VORTEXIA_GIST_ID;
   const nostrSecretHex = process.env.VORTEXIA_NOSTR_SECRET_KEY;
-  if (!envName || (!gistId && !nostrSecretHex)) return null;
+  if (!envName) {
+    logger.info('[vortexia] vortex-relay disabled: VORTEXIA_ENV_NAME is not set (single-Mac mode, no cross-machine messaging)');
+    return null;
+  }
+  if (!gistId && !nostrSecretHex) {
+    logger.warn('[vortexia] vortex-relay disabled: VORTEXIA_ENV_NAME is set but no transport is configured (need VORTEXIA_GIST_ID and/or VORTEXIA_NOSTR_SECRET_KEY) — see vortexia.env.example');
+    return null;
+  }
 
   const envNames = (process.env.VORTEXIA_RELAY_ENV_NAMES || envName)
     .split(',').map((s) => s.trim()).filter(Boolean);

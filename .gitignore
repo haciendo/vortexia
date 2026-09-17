@@ -3,6 +3,7 @@ node_modules/
 logs/
 vortexia.pid
 vortexia.port.json
+vortexia.env
 .DS_Store
 __pycache__/
 *.pyc
