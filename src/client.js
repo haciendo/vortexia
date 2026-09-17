@@ -74,6 +74,16 @@ export class VortexiaClient extends EventEmitter {
       // Keep this a simple, explicit client: no background auto-reconnect
       // loop. Callers that want reconnection should call register() again.
       reconnectPeriod: 0,
+      // mqtt.js's default keepalive is 60s — found live to line up almost
+      // exactly with DirectMqttTransport's cross-machine LAN drops (ba-mac
+      // <-> uy-mac, 8 reconnects/restart, symmetric on both sides): a PING
+      // only every 60s of idle time is long enough for some router/NAT idle
+      // timeouts to expire the connection's table entry first, so the
+      // keepalive never gets a chance to keep it alive. A shorter interval
+      // keeps the path busy enough to stay under those idle timeouts. Local
+      // same-process/localhost connections don't need this, but there's no
+      // real cost to it either.
+      keepalive: 15,
       will: {
         topic: presenceTopic(name),
         payload: 'offline',
