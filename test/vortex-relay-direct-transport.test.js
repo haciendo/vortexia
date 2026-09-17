@@ -161,6 +161,66 @@ test('transportPins pinned to a named connection that has no live match: drops (
   }
 });
 
+test('DirectMqttTransport: a keepalive drop (transport-level close, not a deliberate disconnect) self-heals via reconnect, instead of staying unavailable forever', async () => {
+  // Reproduces the live bug: mDNS keeps advertising the peer the whole
+  // time (it never actually left the LAN) so bridge.js's onUp/onDown never
+  // fires again — the ONLY signal that the connection dropped is the
+  // transport's own 'close' event (client.js line ~53). Before the fix,
+  // that just set connected=false with nothing to ever flip it back.
+  class FlakyClient {
+    constructor() { this._handlers = {}; }
+    async register(name) { this.name = name; return this; }
+    on(event, cb) { this._handlers[event] = cb; }
+    emitClose() { this._handlers.close?.(); }
+    async close() {}
+    async sendConfirmed() {}
+  }
+
+  const transport = new DirectMqttTransport({
+    envName: 'mac-2', host: 'localhost', mqttPort: 1, ClientImpl: FlakyClient,
+    reconnectBaseMs: 5, reconnectMaxMs: 20,
+  });
+
+  await transport.connect();
+  assert.equal(transport.connected, true);
+  const firstClient = transport.client;
+
+  firstClient.emitClose();
+  assert.equal(transport.connected, false, 'a keepalive drop must stop looking connected immediately');
+
+  await new Promise((resolve) => {
+    const check = setInterval(() => {
+      if (transport.connected) { clearInterval(check); resolve(); }
+    }, 5);
+  });
+
+  assert.equal(transport.connected, true, 'the transport must self-heal instead of staying permanently unavailable');
+  assert.notEqual(transport.client, firstClient, 'reconnect must build a fresh client, not reuse the dead one');
+});
+
+test('DirectMqttTransport: a deliberate disconnect() must not trigger a reconnect', async () => {
+  class FlakyClient {
+    constructor() { this._handlers = {}; }
+    async register(name) { this.name = name; return this; }
+    on(event, cb) { this._handlers[event] = cb; }
+    emitClose() { this._handlers.close?.(); }
+    async close() { this.emitClose(); }
+    async sendConfirmed() {}
+  }
+
+  const transport = new DirectMqttTransport({
+    envName: 'mac-2', host: 'localhost', mqttPort: 1, ClientImpl: FlakyClient,
+    reconnectBaseMs: 5, reconnectMaxMs: 20,
+  });
+
+  await transport.connect();
+  await transport.disconnect();
+
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(transport.connected, false, 'a deliberate disconnect (peer actually left, per bridge.js detachDirectTransport) must stay disconnected');
+  assert.equal(transport.client, null);
+});
+
 test('transportPins pinned to "relay": ignores a live, connected direct transport', async () => {
   const relay = new InMemoryRelay();
   const a = await setupEnv('mac-1', { Robotics: 'brazos' }, relay, { transportPins: { 'mac-2': 'relay' } });

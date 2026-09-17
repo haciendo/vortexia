@@ -72,6 +72,15 @@ export class GistRelay {
     this.token = token;
     this.apiUrl = apiUrl;
     this.fetchImpl = fetchImpl;
+    // Per-filename write queue — appendMessage is read-then-append-then-
+    // writeFile, so two calls for the SAME file racing (e.g. a poll retry
+    // and a fresh send landing close together) would each read the same
+    // stale snapshot and the later PATCH would silently clobber the
+    // earlier one's append. Chaining onto this queue serializes writes to
+    // a given file within this process, closing that race; it does not
+    // protect against a second process writing the same file, but the
+    // one-writer-per-file invariant above already rules that out.
+    this._writeQueues = new Map();
   }
 
   _headers(extra = {}) {
@@ -99,6 +108,22 @@ export class GistRelay {
 
   async appendMessage(filename, message) {
     if (!this.token) throw new Error('GistRelay: appendMessage requires a token with the gist scope');
+    // Chain onto whatever's already pending for this file so the read and
+    // its matching write happen atomically with respect to each other —
+    // see _writeQueues doc above. The queue itself must never stay
+    // rejected (a failed append shouldn't wedge every later one for the
+    // same file), so it always swallows the settled result; the real
+    // outcome is returned to THIS caller via `result`.
+    const prior = this._writeQueues.get(filename) ?? Promise.resolve();
+    const result = prior.then(
+      () => this._appendMessageNow(filename, message),
+      () => this._appendMessageNow(filename, message),
+    );
+    this._writeQueues.set(filename, result.then(() => {}, () => {}));
+    return result;
+  }
+
+  async _appendMessageNow(filename, message) {
     const current = await this.readFile(filename).catch(() => []);
     current.push(message);
     const res = await this.fetchImpl(`${this.apiUrl}/gists/${this.gistId}`, {
