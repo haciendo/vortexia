@@ -201,8 +201,12 @@ export async function startBroker({
     ]);
     persistence.flush();
     // Best-effort, time-bounded (see ports.js): a registry that's down at
-    // shutdown costs one warning line, never a hang.
-    await Promise.all([releasePort(mqttPort), releasePort(wsPort)]);
+    // shutdown costs one warning line, never a hang. Sequential, not
+    // parallel: the registry's file store is a naive read-modify-write, so
+    // two concurrent DELETEs from us can make one of them vanish — seen
+    // live, it left a stale 9007 entry behind on an otherwise clean stop.
+    await releasePort(mqttPort);
+    await releasePort(wsPort);
   }
 
   return { aedes, persistence, tcpServer, wsServer, mqttPort, wsPort, close, registryReconcile: Promise.all(reconcilers.map((r) => r.done)) };

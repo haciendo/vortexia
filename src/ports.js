@@ -99,6 +99,22 @@ export async function claimPort(app, { port, range = DEFAULT_RANGE, timeoutMs = 
 }
 
 /**
+ * Who does the registry think holds `port`? Resolves `{ free: true }`,
+ * `{ app, local_agent }` for a registered entry, or `{ unreachable: true }`.
+ */
+export async function registryOwner(port, { timeoutMs = 2000 } = {}) {
+  try {
+    const res = await fetch(`${registryUrl()}/ports`, { signal: withTimeout(timeoutMs) });
+    if (!res.ok) return { unreachable: true };
+    const ports = await res.json();
+    const entry = ports?.[String(port)];
+    return entry ? { app: entry.app, local_agent: entry.local_agent } : { free: true };
+  } catch (err) {
+    return { unreachable: true, error: err.message };
+  }
+}
+
+/**
  * Tell the registry that `app` is bound to `port` — used AFTER binding, so
  * the plain register endpoint is the right one (a pinned /ports/claim would
  * 409 on its own liveness probe, since we're the ones listening). Any other
@@ -248,25 +264,34 @@ export async function bindWithPolicy(server, app, { pinned, sticky, range = DEFA
     return { port: pinned, claimed: false };
   }
 
-  // 2. Sticky: the port from last time. Ask the registry to re-claim it
-  //    (supersedes our own stale entry; 409 means someone else has it now).
+  // 2. Sticky: the port from last time. The registry is consulted as an
+  //    advisory ("has some OTHER app claimed it since?") — not asked to
+  //    re-claim it: a pinned /ports/claim answers 409 to ANY existing entry
+  //    for that port, including our own stale one from a shutdown the
+  //    registry wasn't up for, which is exactly the case sticky ports exist
+  //    for. The bind is the real test of availability; the registry is
+  //    then told what happened (registerBoundPort supersedes the stale
+  //    entry, or is retried in the background if the registry is down).
   if (sticky != null && !excluded.has(sticky)) {
-    const claim = await claimPort(app, { port: sticky });
-    if (!claim.conflict) {
+    const owner = await registryOwner(sticky);
+    const someoneElse = owner.app && !(owner.app === app && owner.local_agent === LOCAL_AGENT);
+    if (someoneElse) {
+      logger.warn(`[vortexia] last bound port ${sticky} for ${app} is now registered to ${owner.app}/${owner.local_agent} — picking another`);
+      excluded.add(sticky);
+    } else {
       try {
         await listenOnce(server, sticky);
-        if (claim.unreachable) {
+        if (owner.unreachable) {
           logger.info(`[vortexia] port registry unreachable — re-using last bound port ${sticky} for ${app}`);
+          return { port: sticky, claimed: false };
         }
-        return { port: sticky, claimed: !claim.unreachable };
+        const registered = await registerBoundPort(app, sticky);
+        return { port: sticky, claimed: registered };
       } catch (err) {
         if (err.code !== 'EADDRINUSE') throw err;
         logger.warn(`[vortexia] last bound port ${sticky} for ${app} is in use by something else — picking another`);
         excluded.add(sticky);
       }
-    } else {
-      logger.warn(`[vortexia] registry says last bound port ${sticky} for ${app} is now taken — picking another`);
-      excluded.add(sticky);
     }
   }
 

@@ -37,7 +37,9 @@ function fakeRegistry() {
       }
       if (req.method === 'POST' && req.url === '/ports/claim') {
         const req_ = JSON.parse(body);
-        if (req_.port != null && ports[String(req_.port)] && ports[String(req_.port)].app !== req_.app) return json(409, { detail: 'taken' });
+        // Same as the real registry: a pinned claim is refused for ANY
+        // existing entry on that port, the claimant's own stale one included.
+        if (req_.port != null && ports[String(req_.port)]) return json(409, { detail: 'taken' });
         const chosen = req_.port ?? (() => { for (let p = req_.start; p < req_.end; p++) if (!ports[String(p)]) return p; })();
         for (const [k, v] of Object.entries(ports)) if (v.app === req_.app && v.local_agent === req_.local_agent && k !== String(chosen)) delete ports[k];
         ports[String(chosen)] = { port: chosen, app: req_.app, local_agent: req_.local_agent, path: req_.path, registered_at: new Date().toISOString() };
@@ -145,6 +147,35 @@ test('boot race: the registry comes up AFTER the broker, and still learns the po
     if (prevUrl === undefined) delete process.env.LAS_REGISTRY_URL; else process.env.LAS_REGISTRY_URL = prevUrl;
   }
   assert.deepEqual(Object.keys(registry.ports), [], 'clean shutdown released both ports');
+});
+
+test('registry up at start but holding our own STALE entry for the sticky port (last shutdown happened with it down): same port again, entry refreshed', async () => {
+  const registryPort = await freeTcpPort();
+  const prevUrl = process.env.LAS_REGISTRY_URL;
+  process.env.LAS_REGISTRY_URL = `http://127.0.0.1:${registryPort}`;
+  const registry = fakeRegistry();
+  await registry.listen(registryPort);
+  const dataDir = tmpDir();
+  try {
+    const first = await startBroker({ dataDir });
+    const { mqttPort, wsPort } = first;
+    await first.close();
+    // Simulate "registry was down at shutdown": put the entries back as if never released.
+    registry.ports[String(mqttPort)] = { port: mqttPort, app: MQTT_APP, local_agent: 'vortexia', path: '/old', registered_at: '2000-01-01' };
+    registry.ports[String(wsPort)] = { port: wsPort, app: WS_APP, local_agent: 'vortexia', path: '/old', registered_at: '2000-01-01' };
+
+    const second = await startBroker({ dataDir });
+    try {
+      assert.equal(second.mqttPort, mqttPort, 'stale own entry must not push us off our port');
+      assert.equal(second.wsPort, wsPort);
+      assert.notEqual(registry.ports[String(mqttPort)].registered_at, '2000-01-01', 'entry was refreshed, not left stale');
+    } finally {
+      await second.close();
+    }
+  } finally {
+    await registry.close();
+    if (prevUrl === undefined) delete process.env.LAS_REGISTRY_URL; else process.env.LAS_REGISTRY_URL = prevUrl;
+  }
 });
 
 test('shutdown with a hung registry is time-bounded', async () => {
