@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { startBroker, defaultDataDir } from './broker.js';
 import { scanScopes } from './scope.js';
 import { logger } from './logger.js';
+import { startLoopWatchdog } from './watchdog.js';
 import { VortexiaClient } from './client.js';
 import { VortexRelayBridge } from './vortex-relay/bridge.js';
 import { GistRelay, NostrRelay, MultiRelay } from './vortex-relay/relay.js';
@@ -167,6 +168,7 @@ async function cmdStart() {
   logger.info(`  MQTT (TCP):     localhost:${mqttPort}`);
   logger.info(`  MQTT (WebSocket): localhost:${wsPort}`);
   logger.info(`  data dir:       ${defaultDataDir()}`);
+  startLoopWatchdog();
 
   const vortexRelay = await startVortexRelay(mqttPort, wsPort).catch((err) => {
     logger.error(`[vortexia] vortex-relay failed to start: ${err.message}`);
