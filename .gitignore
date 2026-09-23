@@ -10,3 +10,4 @@ __pycache__/
 HANDOFF.md
 .las-agent.json
 .agent.json
+data/

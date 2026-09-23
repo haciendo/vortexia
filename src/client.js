@@ -9,6 +9,8 @@ import {
   SPEAK_TOPIC,
   inboxTopic,
   presenceTopic,
+  sessionTopic,
+  mailboxClientId,
   buildEnvelope,
   SCOPE_QUERY_KIND,
   SCOPE_REPLY_KIND,
@@ -55,6 +57,11 @@ export class VortexiaClient extends EventEmitter {
     this.port = port;
     this.name = null;
     this.mqttClient = null;
+    this.mailbox = false;
+    // Set from the CONNACK: true when the broker already held a persistent
+    // session for our client id (mailbox mode only — always false for a
+    // viewer, whose session is clean by definition).
+    this.sessionPresent = false;
   }
 
   /**
@@ -63,14 +70,29 @@ export class VortexiaClient extends EventEmitter {
    * and subscribes to this agent's inbox + the broadcast topic + the
    * shared speak-request topic (callers must filter envelope.to === name
    * on that last one, since it's shared by every agent's widget).
+   *
+   * Two ways to attach to an inbox (see PROTOCOL.md "Mailboxes"):
+   *
+   * - viewer (default): a clean session with a random client id. Sees
+   *   every message that arrives WHILE connected, consumes nothing. This
+   *   is the widget: it displays the conversation, it doesn't own it.
+   * - `{ mailbox: true }`: THE consumer. Connects as the agent's
+   *   persistent session (client id `las-agent-<name>`, clean=false), so
+   *   whatever was queued while nobody was connected is delivered first,
+   *   in order, and each message is acknowledged as it's handled. Only
+   *   one connection can hold the session at a time — a later one takes
+   *   it over (check `sessionState(name)` first if that matters, e.g. a
+   *   one-shot poll while a live listener may be running).
    */
-  async register(name) {
+  async register(name, { mailbox = false } = {}) {
     this.name = name;
+    this.mailbox = mailbox;
     const resolvedPort = await resolvePort(this.port);
     const url = `mqtt://${this.host}:${resolvedPort}`;
 
     this.mqttClient = mqtt.connect(url, {
-      clientId: `vortexia-${name}-${Math.random().toString(16).slice(2)}`,
+      clientId: mailbox ? mailboxClientId(name) : `vortexia-${name}-${Math.random().toString(16).slice(2)}`,
+      clean: !mailbox,
       // Keep this a simple, explicit client: no background auto-reconnect
       // loop. Callers that want reconnection should call register() again.
       reconnectPeriod: 0,
@@ -92,20 +114,11 @@ export class VortexiaClient extends EventEmitter {
       },
     });
 
-    await new Promise((resolve, reject) => {
-      this.mqttClient.once('connect', resolve);
-      this.mqttClient.once('error', reject);
-    });
-
-    this.mqttClient.publish(presenceTopic(name), 'online', { qos: 1, retain: true });
-
-    await new Promise((resolve, reject) => {
-      this.mqttClient.subscribe([inboxTopic(name), BROADCAST_TOPIC, SPEAK_TOPIC], { qos: 1 }, (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
-
+    // Handlers go on BEFORE the connection completes: a mailbox session's
+    // queued backlog starts flowing the instant the broker sends CONNACK,
+    // and anything delivered before a 'message' listener exists is simply
+    // not seen (mqtt.js acks it regardless — it would be consumed and
+    // lost).
     this.mqttClient.on('message', (topic, payload) => {
       let envelope;
       try {
@@ -128,31 +141,56 @@ export class VortexiaClient extends EventEmitter {
     // nowhere.
     this.mqttClient.on('close', () => this.emit('close'));
 
+    const connack = await new Promise((resolve, reject) => {
+      this.mqttClient.once('connect', resolve);
+      this.mqttClient.once('error', reject);
+    });
+    this.sessionPresent = Boolean(connack?.sessionPresent);
+
+    this.mqttClient.publish(presenceTopic(name), 'online', { qos: 1, retain: true });
+
+    // Mailbox: the inbox subscription is part of the persistent session —
+    // the broker restores it on connect (and creates it itself on the
+    // first publish to the inbox), so only subscribe when the session is
+    // brand new. Re-subscribing an existing session would replay any
+    // retained message still on the topic (from a pre-mailbox sender)
+    // on top of the queued copy. Broadcast/speak are subscribed at QoS 0
+    // in mailbox mode: live-only, never queued for an offline agent —
+    // replaying a fan-out or a stale "speak this" later would be wrong.
+    const subs = this.mailbox
+      ? { ...(this.sessionPresent ? {} : { [inboxTopic(name)]: { qos: 1 } }), [BROADCAST_TOPIC]: { qos: 0 }, [SPEAK_TOPIC]: { qos: 0 } }
+      : { [inboxTopic(name)]: { qos: 1 }, [BROADCAST_TOPIC]: { qos: 1 }, [SPEAK_TOPIC]: { qos: 1 } };
+    await new Promise((resolve, reject) => {
+      this.mqttClient.subscribe(subs, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
     return this;
   }
 
   /**
    * Send a message to another agent (or 'broadcast' to send to everyone).
    *
-   * Direct inbox messages are published RETAINED: without this, a message
-   * sent while nobody happens to be subscribed at that exact instant (e.g.
-   * a CLI poll that runs later, or a Claude Code session that only drains
-   * its inbox at its own next start — see PROTOCOL.md) is simply gone,
-   * since plain MQTT delivery only reaches currently-connected subscribers.
-   * Retained delivery means a later subscriber (or poll_inbox) still finds
-   * it. The consumer is responsible for clearing the retained flag once
-   * it's actually been read (poll_inbox does this) — a live viewer like the
-   * Electron widget's own register()/message handler intentionally does
-   * NOT clear it, so it's still there for the "real" consumer later.
-   * Broadcast is NOT retained — the same "latest value replayed forever"
-   * behavior doesn't make sense for a fan-out channel.
+   * Direct inbox messages are plain QoS 1 publishes — NOT retained. The
+   * broker queues them in the recipient's mailbox (its persistent session,
+   * see PROTOCOL.md "Mailboxes") if nobody holds that session right now,
+   * so a message sent while the agent's Claude Code session isn't running
+   * is delivered, in order and alongside every other one sent meanwhile,
+   * the next time it polls or listens. Retaining used to be how this was
+   * done, and it kept exactly ONE message per recipient (the latest
+   * overwrote the rest); `retain: true` is still accepted for a caller
+   * that knowingly wants the old single-slot behavior. Broadcast is never
+   * retained — replaying the last fan-out to every new subscriber forever
+   * makes no sense for that channel.
    */
-  send(toName, text, { from = this.name, source = 'agent', ...extra } = {}) {
+  send(toName, text, { from = this.name, source = 'agent', retain = false, ...extra } = {}) {
     if (!this.mqttClient) throw new Error('client not registered — call register(name) first');
     const envelope = { ...buildEnvelope({ from, to: toName, source, text }), ...extra };
     const isBroadcast = toName === 'broadcast';
     const topic = isBroadcast ? BROADCAST_TOPIC : inboxTopic(toName);
-    this.mqttClient.publish(topic, JSON.stringify(envelope), { qos: 1, retain: !isBroadcast });
+    this.mqttClient.publish(topic, JSON.stringify(envelope), { qos: 1, retain: retain && !isBroadcast });
     return envelope;
   }
 
@@ -176,7 +214,7 @@ export class VortexiaClient extends EventEmitter {
    * arrived and nothing ever threw, so ConnectionRouter never got the
    * chance to fall back to the relay.
    */
-  sendConfirmed(toName, text, { from = this.name, source = 'agent', timeoutMs = 3000, ...extra } = {}) {
+  sendConfirmed(toName, text, { from = this.name, source = 'agent', timeoutMs = 3000, retain = false, ...extra } = {}) {
     if (!this.mqttClient) throw new Error('client not registered — call register(name) first');
     const envelope = { ...buildEnvelope({ from, to: toName, source, text }), ...extra };
     const isBroadcast = toName === 'broadcast';
@@ -186,7 +224,7 @@ export class VortexiaClient extends EventEmitter {
         () => reject(new Error(`sendConfirmed: no ack from broker within ${timeoutMs}ms — connection is likely dead`)),
         timeoutMs,
       );
-      this.mqttClient.publish(topic, JSON.stringify(envelope), { qos: 1, retain: !isBroadcast }, (err) => {
+      this.mqttClient.publish(topic, JSON.stringify(envelope), { qos: 1, retain: retain && !isBroadcast }, (err) => {
         clearTimeout(timer);
         if (err) reject(err);
         else resolve(envelope);
@@ -303,6 +341,74 @@ export class VortexiaClient extends EventEmitter {
       new Promise((resolve) => setTimeout(resolve, 1000)),
     ]);
   }
+}
+
+/**
+ * Is `name`'s mailbox session currently held by a live connection? Reads
+ * the retained, broker-published `las/agent/<name>/session` topic with a
+ * throwaway clean client. Resolves `{ connected, clientId, ts }`, with
+ * `connected: false` when the broker has never seen that session (or has
+ * restarted since — retained session state isn't persisted, and a
+ * consumer that's really connected republishes it by reconnecting).
+ */
+export async function sessionState(name, { host = 'localhost', port, timeoutMs = 700 } = {}) {
+  const resolvedPort = await resolvePort(port);
+  const client = mqtt.connect(`mqtt://${host}:${resolvedPort}`, {
+    clientId: `vortexia-session-${Math.random().toString(16).slice(2)}`,
+    clean: true,
+    reconnectPeriod: 0,
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      client.once('connect', resolve);
+      client.once('error', reject);
+    });
+    return await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ connected: false }), timeoutMs);
+      client.on('message', (topic, payload) => {
+        if (topic !== sessionTopic(name)) return;
+        clearTimeout(timer);
+        try {
+          const state = JSON.parse(payload.toString());
+          resolve({ connected: Boolean(state.connected), clientId: state.clientId, ts: state.ts });
+        } catch {
+          resolve({ connected: false });
+        }
+      });
+      client.subscribe(sessionTopic(name), { qos: 0 });
+    });
+  } finally {
+    await new Promise((resolve) => client.end(true, {}, resolve));
+  }
+}
+
+/**
+ * One-shot mailbox drain: connect as `name`'s consumer, hand back every
+ * queued (and, during the window, newly arriving) message, disconnect.
+ * Each message is acknowledged as it's received, so a second poll does not
+ * see it again. The counterpart of the Python client's poll_inbox for a
+ * CLI/session that can't stay subscribed.
+ *
+ * If a live consumer already holds the session (a `listen` running under
+ * the agent's Monitor, say), this returns [] WITHOUT connecting as the
+ * mailbox — taking the session over would kick that listener, and with a
+ * reconnecting listener the two would keep kicking each other. Pass
+ * `takeover: true` to insist.
+ */
+export async function pollInbox(name, { host = 'localhost', port, timeoutMs = 2000, takeover = false } = {}) {
+  if (!takeover) {
+    const state = await sessionState(name, { host, port });
+    if (state.connected) return [];
+  }
+  const client = new VortexiaClient({ host, port });
+  const collected = [];
+  client.on('message', (envelope, topic) => {
+    if (topic === inboxTopic(name)) collected.push(envelope);
+  });
+  await client.register(name, { mailbox: true });
+  await new Promise((resolve) => setTimeout(resolve, timeoutMs));
+  await client.close();
+  return collected;
 }
 
 export default VortexiaClient;

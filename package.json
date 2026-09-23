@@ -11,10 +11,12 @@
     "start": "node src/index.js start",
     "stop": "node src/index.js stop",
     "status": "node src/index.js status",
-    "test": "LAS_REGISTRY_URL=http://127.0.0.1:39217 VORTEXIA_LOG_FILE=/tmp/vortexia-test.log node --test --test-concurrency=1"
+    "test": "LAS_REGISTRY_URL=http://127.0.0.1:39217 VORTEXIA_LOG_FILE=/tmp/vortexia-test.log VORTEXIA_DATA_DIR=$(mktemp -d /tmp/vortexia-test-data.XXXXXX) node --test --test-concurrency=1 --test-timeout=30000"
   },
   "dependencies": {
     "aedes": "^0.51.3",
+    "aedes-packet": "^3.0.0",
+    "aedes-persistence": "^9.1.2",
     "aedes-server-factory": "^0.2.1",
     "bonjour-service": "^1.4.4",
     "mqtt": "^5.10.3",

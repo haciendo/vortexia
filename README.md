@@ -32,37 +32,56 @@ npm stop           # or: node src/index.js stop
 (`vortexia start &`) or send it a signal / run `vortexia stop`, which reads
 the pidfile and sends `SIGTERM`.
 
-On startup vortexia claims two ports from the local-agent-society port
-registry (`http://localhost:8700`):
+vortexia listens on two ports:
 
 - `vortexia-mqtt` — TCP MQTT listener, for `las`/Python clients (paho-mqtt)
 - `vortexia-ws` — WebSocket MQTT listener, for an Electron renderer using
   `mqtt.js` directly (no native deps)
 
-If the registry is unreachable (e.g. the local-agent-society backend isn't
-running), vortexia logs a warning and falls back to ports 1883/8883 rather
-than failing to start — the registry is a nice-to-have, not a hard
-dependency.
+Which ports, in order of precedence: an explicit pin (`VORTEXIA_MQTT_PORT`
+/ `VORTEXIA_WS_PORT` in `vortexia.env`) → the ports bound last time
+(`data/ports.json`, so a restart lands on the same ports whether or not
+anything else is up) → a claim from the local-agent-society port registry
+(`http://localhost:8700`) → a locally probed free port in 9000–9999.
+Binding never waits on the registry: whatever got bound is registered
+there right away if it's reachable, otherwise from a background retry loop
+with backoff, superseding any stale entry it still holds for vortexia.
+This is what fixes the login boot race where the broker used to come up
+before the registry and fall back to 1883 while the registry kept
+advertising the previous run's port.
 
-`vortexia.port.json` records whichever ports actually got used, so clients
-that can't reach the registry can still find the broker locally.
+`vortexia.port.json` (with the broker's pid) records the ports actually in
+use — clients read it first, before asking the registry.
 
-On shutdown (`SIGINT`/`SIGTERM`), vortexia closes the broker cleanly and
-releases both claimed ports back to the registry.
+On shutdown (`SIGINT`/`SIGTERM`), vortexia flushes its mailbox snapshot,
+closes the broker and releases both ports from the registry — best-effort
+and time-bounded: a registry that's down at shutdown gets a warning line,
+and its stale entry is superseded on the next start. Shutdown never takes
+more than a few seconds regardless.
+
+State that outlives one process lives in `data/` (gitignored;
+`VORTEXIA_DATA_DIR` overrides): `ports.json` and `mailboxes.json` (see
+PROTOCOL.md "Mailboxes").
 
 ## Using it from JS/Node
 
 ```js
-import { VortexiaClient } from 'vortexia/src/client.js';
+import { VortexiaClient, pollInbox } from 'vortexia/src/client.js';
 
 const client = new VortexiaClient(); // defaults: localhost, port from vortexia.port.json or the registry
-await client.register('MyAgent');
-
 client.on('message', (envelope, topic) => {
   console.log(envelope.from, '->', envelope.text);
 });
+// As the agent's mailbox consumer: queued backlog first, then live, each
+// acknowledged as handled. Without { mailbox: true } you're a viewer —
+// live traffic only, nothing consumed (what the widget does).
+await client.register('MyAgent', { mailbox: true });
 
-client.send('OtherAgent', 'hello there');
+client.send('OtherAgent', 'hello there'); // queued for OtherAgent if it isn't connected
+
+// One-shot: drain the mailbox and disconnect (stands down if a live
+// consumer already holds the session).
+const backlog = await pollInbox('MyAgent', { timeoutMs: 2000 });
 ```
 
 ## Using it from Python
@@ -78,11 +97,12 @@ pip install paho-mqtt
 from vortexia_client import VortexiaClient, poll_inbox
 
 client = VortexiaClient(host="localhost", port=1883)
-client.register("MyAgent")
-client.send("OtherAgent", "hello there")
+client.register("MyAgent", mailbox=True)   # consumer; omit mailbox= for a viewer
+client.send("OtherAgent", "hello there")   # queued for OtherAgent if it isn't connected
 client.close()
 
-# One-shot CLI usage: drain whatever's waiting in your inbox and exit.
+# One-shot CLI usage: drain whatever's waiting in your mailbox and exit
+# (returns [] without touching the session if a live listener holds it).
 messages = poll_inbox("MyAgent", timeout=2.0)
 for m in messages:
     print(m["from"], "->", m["text"])
@@ -93,6 +113,8 @@ for m in messages:
 - `las/agent/<name>/inbox` — direct message to one agent
 - `las/broadcast` — message to all agents
 - `las/agent/<name>/presence` — retained online/offline status (via LWT)
+- `las/agent/<name>/session` — retained, broker-published: whether the
+  agent's mailbox consumer is connected right now
 
 Full details, including the JSON message envelope, are in
 [PROTOCOL.md](./PROTOCOL.md).

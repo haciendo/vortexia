@@ -112,7 +112,7 @@ test('broadcast reaches all subscribed agents', async () => {
   }
 });
 
-test('inbox messages are retained: a subscriber that connects AFTER the send still receives it', async () => {
+test('inbox messages reach an agent that connects AFTER the send, via its mailbox', async () => {
   const broker = await startBroker();
   const sender = new VortexiaClient({ port: broker.mqttPort });
 
@@ -122,12 +122,13 @@ test('inbox messages are retained: a subscriber that connects AFTER the send sti
 
     // Give the publish a moment to land, then connect the receiver — this
     // is the whole point: NOT subscribed at send time, unlike the other
-    // direct-message test above.
+    // direct-message test above. The receiver connects as the mailbox
+    // consumer; a plain viewer would (correctly) see nothing.
     await new Promise((r) => setTimeout(r, 100));
 
     const receiver = new VortexiaClient({ port: broker.mqttPort });
     const received = new Promise((resolve) => receiver.once('message', resolve));
-    await receiver.register('LateJoiner');
+    await receiver.register('LateJoiner', { mailbox: true });
 
     const envelope = await received;
     assert.equal(envelope.text, 'were you listening?');

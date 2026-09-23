@@ -1,6 +1,8 @@
 // Topic schema for vortexia — kept minimal and stable.
 // See PROTOCOL.md for the full contract.
 
+import crypto from 'node:crypto';
+
 export const BROADCAST_TOPIC = 'las/broadcast';
 
 // TTS request topic (see PROTOCOL.md "Extension: kind field and las/speak").
@@ -16,6 +18,34 @@ export function presenceTopic(name) {
 }
 
 /**
+ * Retained, broker-published state of `name`'s mailbox consumer: whether
+ * the persistent session `las-agent-<name>` currently has a live
+ * connection. A one-shot poll checks this before taking the session over
+ * (see PROTOCOL.md "Mailboxes").
+ */
+export function sessionTopic(name) {
+  return `las/agent/${name}/session`;
+}
+
+/**
+ * The MQTT client id of `name`'s mailbox session. Whoever connects with
+ * this id and clean=false IS the consumer of that agent's inbox — there is
+ * exactly one at a time (a later connection takes the session over from
+ * an earlier one, per MQTT-3.1.4-2).
+ */
+export function mailboxClientId(name) {
+  return `las-agent-${name}`;
+}
+
+/** Inverse of inboxTopic: the agent name, or null if `topic` isn't an inbox. */
+export function parseInboxTopic(topic) {
+  if (typeof topic !== 'string') return null;
+  const parts = topic.split('/');
+  if (parts.length !== 4 || parts[0] !== 'las' || parts[1] !== 'agent' || parts[3] !== 'inbox') return null;
+  return parts[2] || null;
+}
+
+/**
  * Build a standard message envelope.
  * @param {object} opts
  * @param {string} opts.from - sender agent name
@@ -23,9 +53,11 @@ export function presenceTopic(name) {
  * @param {string} [opts.source] - 'agent' | 'human' | 'system'
  * @param {string} opts.text - message body
  * @param {number} [opts.ts] - epoch ms, defaults to now
+ * @param {string} [opts.id] - unique message id, defaults to a UUID (lets a
+ *   consumer dedupe the rare QoS 1 redelivery)
  */
-export function buildEnvelope({ from, to, source = 'agent', text, ts = Date.now() }) {
-  return { from, to, source, text, ts };
+export function buildEnvelope({ from, to, source = 'agent', text, ts = Date.now(), id = crypto.randomUUID() }) {
+  return { id, from, to, source, text, ts };
 }
 
 // Scope-ladder query protocol (see docs/future-las-agent-scope-router.md,

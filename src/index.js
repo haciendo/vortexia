@@ -3,7 +3,7 @@ import './env.js'; // must load first — see env.js's doc comment
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startBroker } from './broker.js';
+import { startBroker, defaultDataDir } from './broker.js';
 import { scanScopes } from './scope.js';
 import { logger } from './logger.js';
 import { VortexiaClient } from './client.js';
@@ -130,8 +130,12 @@ async function startVortexRelay(mqttPort, wsPort) {
   if (nostrRelay) {
     logger.info(`[vortexia] Nostr identity pubkey (share this for peers to trust ${envName}): ${await nostrRelay.publicKeyHex()}`);
   }
+  // The gateway is the one consumer of `<env>-gateway`'s inbox: connect
+  // as its mailbox session so an intent published in the moments before
+  // it was up (the broker accepts publishes as soon as it binds) is
+  // queued and handled, not dropped.
   const gateway = new VortexiaClient({ port: mqttPort });
-  await gateway.register(`${envName}-gateway`);
+  await gateway.register(`${envName}-gateway`, { mailbox: true });
 
   const bridge = new VortexRelayBridge({ envName, relay, envNames }).attach(gateway);
   const roster = await discoverLocalRoster();
@@ -162,6 +166,7 @@ async function cmdStart() {
   logger.info(`vortexia broker started (pid ${process.pid})`);
   logger.info(`  MQTT (TCP):     localhost:${mqttPort}`);
   logger.info(`  MQTT (WebSocket): localhost:${wsPort}`);
+  logger.info(`  data dir:       ${defaultDataDir()}`);
 
   const vortexRelay = await startVortexRelay(mqttPort, wsPort).catch((err) => {
     logger.error(`[vortexia] vortex-relay failed to start: ${err.message}`);
@@ -170,6 +175,14 @@ async function cmdStart() {
 
   const shutdown = async (signal) => {
     logger.info(`vortexia: received ${signal}, shutting down...`);
+    // Hard deadline: nothing below may keep the process alive past this —
+    // not a hung registry, not a client that never acks. launchd would
+    // SIGKILL us eventually anyway; better to exit on our own terms with
+    // the mailbox snapshot already flushed (close() does that first).
+    setTimeout(() => {
+      logger.warn('vortexia: shutdown exceeded 5s — exiting now');
+      process.exit(0);
+    }, 5000).unref();
     try {
       if (vortexRelay) {
         vortexRelay.bridge.stopPolling();
