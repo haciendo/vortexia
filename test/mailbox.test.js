@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { startBroker } from '../src/broker.js';
 import { VortexiaClient, pollInbox, sessionState } from '../src/client.js';
-import { inboxTopic } from '../src/topics.js';
+import { inboxTopic, presenceTopic } from '../src/topics.js';
+import mqtt from 'mqtt';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'vortexia-mailbox-'));
@@ -178,6 +179,27 @@ test('broadcast is not queued for offline mailboxes', async () => {
     assert.deepEqual(got, []);
   } finally {
     await sender.close();
+    await broker.close();
+  }
+});
+
+test('pollInbox does not touch presence: an agent registered "online" still reads online after a poll', async () => {
+  const broker = await startBroker({ dataDir: tmpDir(), persist: false });
+  const registrar = mqtt.connect(`mqtt://localhost:${broker.mqttPort}`, { clientId: 'reg-' + Math.random().toString(16).slice(2), reconnectPeriod: 0 });
+  await new Promise((r, j) => { registrar.once('connect', r); registrar.once('error', j); });
+  try {
+    // What `las agent register` does: a one-shot retained "online".
+    await new Promise((r) => registrar.publish(presenceTopic('MbPresent8'), 'online', { qos: 1, retain: true }, r));
+    await pollInbox('MbPresent8', { port: broker.mqttPort, timeoutMs: 100, takeover: true });
+    await sleep(100);
+
+    const presence = await new Promise((resolve) => {
+      registrar.on('message', (topic, payload) => { if (topic === presenceTopic('MbPresent8')) resolve(payload.toString()); });
+      registrar.subscribe(presenceTopic('MbPresent8'), { qos: 1 });
+    });
+    assert.equal(presence, 'online');
+  } finally {
+    registrar.end(true);
     await broker.close();
   }
 });

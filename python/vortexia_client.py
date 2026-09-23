@@ -108,8 +108,15 @@ class VortexiaClient:
         name: str,
         on_message: Optional[Callable[[dict, str], None]] = None,
         mailbox: bool = False,
+        presence: bool = True,
     ) -> "VortexiaClient":
         """Connect, set LWT presence, subscribe to own inbox + broadcast.
+
+        `presence=False` skips the LWT and the online/offline publishes: for
+        a short-lived connection (a one-shot poll) that must not overwrite
+        the retained presence a longer-lived registration already set —
+        connecting, then disconnecting, would leave the agent reading
+        "offline" seconds after `las agent register` said "online".
 
         `mailbox=True` connects as the agent's persistent session (see the
         module docstring): the inbox subscription then belongs to the session
@@ -123,12 +130,15 @@ class VortexiaClient:
         self._on_message = on_message
 
         client_id = mailbox_client_id(name) if mailbox else f"vortexia-{name}-{uuid.uuid4().hex[:8]}"
+        self.presence = presence
         client = mqtt.Client(client_id=client_id, clean_session=not mailbox, protocol=mqtt.MQTTv311)
-        client.will_set(presence_topic(name), payload="offline", qos=1, retain=True)
+        if presence:
+            client.will_set(presence_topic(name), payload="offline", qos=1, retain=True)
 
         def _on_connect(c, userdata, flags, rc, *_args):
             self.session_present = _session_present(flags)
-            c.publish(presence_topic(name), "online", qos=1, retain=True)
+            if presence:
+                c.publish(presence_topic(name), "online", qos=1, retain=True)
             if mailbox:
                 subs = [(BROADCAST_TOPIC, 0)]
                 if not self.session_present:
@@ -173,7 +183,7 @@ class VortexiaClient:
     def close(self) -> None:
         if not self._client:
             return
-        if self.name:
+        if self.name and getattr(self, "presence", True):
             self._client.publish(presence_topic(self.name), "offline", qos=1, retain=True)
             time.sleep(0.1)  # give the publish a moment to flush before disconnecting
         self._client.loop_stop()
@@ -246,7 +256,7 @@ def poll_inbox(
             collected.append(envelope)
 
     client = VortexiaClient(host=host, port=port)
-    client.register(name, on_message=_on_message, mailbox=True)
+    client.register(name, on_message=_on_message, mailbox=True, presence=False)
     time.sleep(timeout)
     client.close()
     return collected

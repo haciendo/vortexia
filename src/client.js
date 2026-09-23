@@ -84,9 +84,15 @@ export class VortexiaClient extends EventEmitter {
    *   it over (check `sessionState(name)` first if that matters, e.g. a
    *   one-shot poll while a live listener may be running).
    */
-  async register(name, { mailbox = false } = {}) {
+  async register(name, { mailbox = false, presence = true } = {}) {
     this.name = name;
     this.mailbox = mailbox;
+    // `presence: false` skips the LWT and the online/offline publishes —
+    // for a short-lived connection (pollInbox) that must not overwrite
+    // the retained presence a longer-lived registration already set:
+    // connect-then-disconnect would leave the agent reading "offline"
+    // seconds after `las agent register` said "online".
+    this.presence = presence;
     const resolvedPort = await resolvePort(this.port);
     const url = `mqtt://${this.host}:${resolvedPort}`;
 
@@ -106,12 +112,14 @@ export class VortexiaClient extends EventEmitter {
       // same-process/localhost connections don't need this, but there's no
       // real cost to it either.
       keepalive: 15,
-      will: {
-        topic: presenceTopic(name),
-        payload: 'offline',
-        qos: 1,
-        retain: true,
-      },
+      ...(presence ? {
+        will: {
+          topic: presenceTopic(name),
+          payload: 'offline',
+          qos: 1,
+          retain: true,
+        },
+      } : {}),
     });
 
     // Handlers go on BEFORE the connection completes: a mailbox session's
@@ -147,7 +155,7 @@ export class VortexiaClient extends EventEmitter {
     });
     this.sessionPresent = Boolean(connack?.sessionPresent);
 
-    this.mqttClient.publish(presenceTopic(name), 'online', { qos: 1, retain: true });
+    if (presence) this.mqttClient.publish(presenceTopic(name), 'online', { qos: 1, retain: true });
 
     // Mailbox: the inbox subscription is part of the persistent session —
     // the broker restores it on connect (and creates it itself on the
@@ -320,7 +328,7 @@ export class VortexiaClient extends EventEmitter {
 
   async close() {
     if (!this.mqttClient) return;
-    if (this.name) {
+    if (this.name && this.presence !== false) {
       // Clean, deliberate disconnect: publish offline ourselves instead of
       // relying on the LWT (LWT is for unexpected drops). But don't let a
       // QoS 1 publish that never gets PUBACK'd hang close() forever — if
@@ -405,7 +413,7 @@ export async function pollInbox(name, { host = 'localhost', port, timeoutMs = 20
   client.on('message', (envelope, topic) => {
     if (topic === inboxTopic(name)) collected.push(envelope);
   });
-  await client.register(name, { mailbox: true });
+  await client.register(name, { mailbox: true, presence: false });
   await new Promise((resolve) => setTimeout(resolve, timeoutMs));
   await client.close();
   return collected;
