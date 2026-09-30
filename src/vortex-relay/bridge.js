@@ -431,7 +431,9 @@ export class VortexRelayBridge {
       if (this._bootstrapCutoff && (m?.ts ?? 0) < this._bootstrapCutoff) continue;
       this._deliverLocally(m);
     }
-    this._bootstrapCutoff = null;
+    // Keep the first-run cutoff until a read actually returned something: an
+    // empty first read may just be every relay timing out.
+    if (messages.length) this._bootstrapCutoff = null;
     if (changed) this._saveSeen();
   }
 

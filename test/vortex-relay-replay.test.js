@@ -66,3 +66,13 @@ test('relayMessageKey: id when present, content hash for older senders without o
   assert.equal(relayMessageKey(legacy), relayMessageKey({ ...legacy }));
   assert.notEqual(relayMessageKey(legacy), relayMessageKey({ ...legacy, ts: 2 }));
 });
+
+test('first run: an empty first read (relays timing out) does not end the bootstrap window', async () => {
+  const relay = scriptedRelay();
+  const { bridge, delivered } = bridgeWith(relay, { seenFile: tmpFile() });
+  relay.next = [];
+  await bridge._pollOnce();
+  relay.next = [msg('old', 'yesterday', Date.now() - 24 * 3600 * 1000), msg('new', 'just now')];
+  await bridge._pollOnce();
+  assert.deepEqual(delivered, ['just now']);
+});
