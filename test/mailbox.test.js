@@ -306,3 +306,18 @@ test('mailbox drop: refused for a live consumer unless forced, and for non-mailb
     await broker.close();
   }
 });
+
+test('a consumer re-subscribing its own inbox at QoS 0 does not stop the mailbox from queueing', async () => {
+  const broker = await startBroker({ dataDir: tmpDir(), persist: false });
+  const topic = inboxTopic('MbDowngrade13');
+  try {
+    const { c } = await rawConsumer(broker.mqttPort, mailboxClientId('MbDowngrade13'));
+    await c.subscribeAsync(topic, { qos: 1 });
+    await c.subscribeAsync(topic); // mqtt.js default: QoS 0
+    await c.endAsync();
+    await publishOnce(broker.mqttPort, topic, 'kept');
+    assert.equal(broker.persistence.queuedFor('MbDowngrade13'), 1);
+  } finally {
+    await broker.close();
+  }
+});

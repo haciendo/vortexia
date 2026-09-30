@@ -327,6 +327,11 @@ export class MailboxPersistence {
   // ── subscriptions (delegated, plus session bookkeeping) ──────────────────
 
   addSubscriptions(client, subs, cb) {
+    // Same ownership rule as removeSubscriptions: a consumer re-subscribing
+    // its own inbox at QoS 0 (mqtt.js's default) must not downgrade the
+    // mailbox — at QoS 0 the stored subscription stops queueing offline.
+    // Only the stored copy is kept at QoS 1; the live grant is untouched.
+    subs = subs.map((sub) => (sub.qos < 1 && mailboxOwnerOf(sub.topic) === client.id ? { ...sub, qos: 1 } : sub));
     this.inner.addSubscriptions(client, subs, (err, c) => {
       if (!err) { this.sessions.add(client.id); this._scheduleFlush(); }
       cb(err, c);
