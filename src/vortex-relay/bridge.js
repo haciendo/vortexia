@@ -9,6 +9,9 @@
 // environments routed to it, and delivers those to the matched local
 // agent(s).
 
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
 import { pickTargets } from './router.js';
 import { publishDirectory, mergeDirectories, resolveDirectoryName, splitSessionSelector } from './directory.js';
 import { DirectMqttTransport } from './directTransport.js';
@@ -25,6 +28,16 @@ export const VORTEX_RELAY_KIND = 'vortex-relay-intent';
 // relays to the owning environment, bypassing pickTargets entirely — an
 // exact name is exact, it doesn't need a semantic match.
 export const VORTEX_RELAY_DIRECT_KIND = 'vortex-relay-direct';
+
+const SEEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const SEEN_MAX = 5000;
+const SEEN_BOOTSTRAP_WINDOW_MS = 10 * 60 * 1000;
+
+/** Identity of a relay message: its id, or (older senders without one) its full content. */
+export function relayMessageKey(m) {
+  if (m && typeof m.id === 'string' && m.id) return `id:${m.id}`;
+  return `sha:${crypto.createHash('sha256').update(JSON.stringify(m)).digest('hex')}`;
+}
 
 export class VortexRelayBridge {
   /**
@@ -50,7 +63,12 @@ export class VortexRelayBridge {
    *   available Connection first, falling back down the list on failure
    *   (see connection.js/ConnectionRouter).
    */
-  constructor({ envName, relay, directory = [], envNames, matchOpts = {}, transportPins = {} }) {
+  /**
+   * `seenFile` (optional): where the ids of relay messages already delivered
+   * are kept across restarts — see _pollOnce. Without it the seen-set lives
+   * in memory only (tests).
+   */
+  constructor({ envName, relay, directory = [], envNames, matchOpts = {}, transportPins = {}, seenFile = null }) {
     this.envName = envName;
     this.relay = relay;
     this.directory = directory;
@@ -61,7 +79,16 @@ export class VortexRelayBridge {
     this._pollTimer = null;
     this._directoryTimer = null;
     this._publishTimer = null;
-    this._lastIndex = -1;
+    // Relay messages already delivered, key -> first-seen ms. Keyed by
+    // message identity, NOT by position in the store: a Nostr read merges
+    // whatever each public relay answers within its timeout, so the same
+    // log comes back longer or shorter from one poll to the next, and a
+    // position cursor walked backwards on every short read and re-delivered
+    // the tail on the next full one (a single rollout request reached
+    // System@uy-mac 9+ times, 2026-09-30). Persisted, because a restart
+    // used to start the cursor at -1 and replay the whole store.
+    this.seenFile = seenFile;
+    this._seen = this._loadSeen();
     // What resolveDirectoryName() searches — starts as the static seed,
     // widened by syncDirectory() once it's run at least once.
     this._mergedEntries = directory;
@@ -161,6 +188,7 @@ export class VortexRelayBridge {
 
     for (const [envName, agentNames] of agentNamesByEnv) {
       const routed = {
+        id: crypto.randomUUID(),
         from: envelope.from,
         intent: envelope.intent,
         text: envelope.text,
@@ -228,6 +256,7 @@ export class VortexRelayBridge {
     }
 
     const routed = {
+      id: crypto.randomUUID(),
       from: envelope.from,
       text: envelope.text,
       agentNames: [resolved.agentName],
@@ -389,9 +418,51 @@ export class VortexRelayBridge {
 
   async _pollOnce() {
     const messages = await this.relay.readFile(this.outboxFileFor(this.envName));
-    for (let i = this._lastIndex + 1; i < messages.length; i++) {
-      this._deliverLocally(messages[i]);
+    if (!Array.isArray(messages)) return;
+    let changed = false;
+    for (const m of messages) {
+      const key = relayMessageKey(m);
+      if (this._seen.has(key)) continue;
+      this._seen.set(key, Date.now());
+      changed = true;
+      // First run with a seen file configured but none on disk yet (i.e.
+      // the upgrade from the position cursor): the store may hold days of
+      // already-delivered messages — only the recent ones may still be new.
+      if (this._bootstrapCutoff && (m?.ts ?? 0) < this._bootstrapCutoff) continue;
+      this._deliverLocally(m);
     }
-    this._lastIndex = messages.length - 1;
+    this._bootstrapCutoff = null;
+    if (changed) this._saveSeen();
+  }
+
+  _loadSeen() {
+    const seen = new Map();
+    this._bootstrapCutoff = null;
+    if (!this.seenFile) return seen;
+    try {
+      const data = JSON.parse(fs.readFileSync(this.seenFile, 'utf8'));
+      for (const [k, t] of Object.entries(data?.seen ?? {})) seen.set(k, t);
+    } catch (err) {
+      if (err.code === 'ENOENT') this._bootstrapCutoff = Date.now() - SEEN_BOOTSTRAP_WINDOW_MS;
+      else console.warn(`[vortex-relay:${this.envName}] relay seen-set ${this.seenFile} unreadable (${err.message}) — starting empty`);
+    }
+    return seen;
+  }
+
+  _saveSeen() {
+    if (!this.seenFile) return;
+    // Bounded: drop entries past the TTL, then the oldest beyond the cap.
+    const cutoff = Date.now() - SEEN_TTL_MS;
+    let entries = [...this._seen].filter(([, t]) => t >= cutoff);
+    if (entries.length > SEEN_MAX) entries = entries.sort((a, b) => a[1] - b[1]).slice(-SEEN_MAX);
+    this._seen = new Map(entries);
+    try {
+      fs.mkdirSync(path.dirname(this.seenFile), { recursive: true });
+      const tmp = `${this.seenFile}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ seen: Object.fromEntries(entries) }));
+      fs.renameSync(tmp, this.seenFile);
+    } catch (err) {
+      console.warn(`[vortex-relay:${this.envName}] could not write relay seen-set ${this.seenFile}: ${err.message}`);
+    }
   }
 }

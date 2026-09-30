@@ -137,8 +137,41 @@ async function startVortexRelay(mqttPort, wsPort) {
   // queued and handled, not dropped.
   const gateway = new VortexiaClient({ port: mqttPort });
   await gateway.register(`${envName}-gateway`, { mailbox: true });
+  // The client never reconnects by itself (reconnectPeriod 0). Without
+  // this, one keep-alive timeout — the Mac sleeping is enough — left the
+  // gateway dead until the next restart: every outgoing cross-machine
+  // message sat unread in its mailbox and every incoming one was published
+  // on a closed client and lost (2026-09-30, 16:53 → found 17:20). Same
+  // mailbox id, so whatever queued meanwhile is delivered on reconnect.
+  let gatewayStopping = false;
+  let gatewayRetryMs = 1000;
+  let gatewayTimer = null;
+  const reconnectGateway = () => {
+    // One pending attempt at a time: a failed connect both rejects and
+    // emits 'close'.
+    if (gatewayStopping || gatewayTimer) return;
+    gatewayTimer = setTimeout(async () => {
+      gatewayTimer = null;
+      try {
+        await gateway.register(`${envName}-gateway`, { mailbox: true });
+        gatewayRetryMs = 1000;
+        logger.info(`[vortexia] vortex-relay gateway reconnected (${envName}-gateway)`);
+      } catch (err) {
+        logger.warn(`[vortexia] vortex-relay gateway reconnect failed (${err.message}) — retrying in ${gatewayRetryMs}ms`);
+        gatewayRetryMs = Math.min(gatewayRetryMs * 2, 30000);
+        reconnectGateway();
+      }
+    }, gatewayRetryMs);
+    gatewayTimer.unref?.();
+  };
+  gateway.on('close', () => {
+    if (gatewayStopping) return;
+    logger.warn(`[vortexia] vortex-relay gateway connection closed — reconnecting`);
+    reconnectGateway();
+  });
+  const stopGateway = async () => { gatewayStopping = true; clearTimeout(gatewayTimer); await gateway.close(); };
 
-  const bridge = new VortexRelayBridge({ envName, relay, envNames }).attach(gateway);
+  const bridge = new VortexRelayBridge({ envName, relay, envNames, seenFile: path.join(defaultDataDir(), `relay-seen-${envName}.json`) }).attach(gateway);
   const roster = await discoverLocalRoster();
   // See bridge.js's startDirectorySync doc comment: publish (a Gist write)
   // hits GitHub's 100/hour gist_update secondary limit shared across every
@@ -149,7 +182,7 @@ async function startVortexRelay(mqttPort, wsPort) {
   const lan = await startLanDiscovery(bridge, { envName, mqttPort, wsPort });
 
   logger.info(`[vortexia] vortex-relay enabled: env=${envName}, envNames=[${envNames.join(', ')}], local roster=${roster.length} agent(s)`);
-  return { bridge, gateway, lan };
+  return { bridge, gateway, stopGateway, lan };
 }
 
 async function cmdStart() {
@@ -190,7 +223,7 @@ async function cmdStart() {
         vortexRelay.bridge.stopPolling();
         vortexRelay.bridge.stopDirectorySync();
         vortexRelay.lan?.stop();
-        await vortexRelay.gateway.close();
+        await vortexRelay.stopGateway();
       }
       await close();
     } finally {
