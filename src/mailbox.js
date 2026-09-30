@@ -119,10 +119,14 @@ export class MailboxPersistence {
     try {
       data = JSON.parse(fs.readFileSync(this.file, 'utf8'));
     } catch (err) {
-      if (err.code !== 'ENOENT') logger.warn(`[vortexia] mailbox snapshot ${this.file} unreadable (${err.message}) — starting with empty mailboxes`);
+      if (err.code === 'ENOENT') logger.info(`[vortexia] no mailbox snapshot at ${this.file} yet — starting with empty mailboxes (it is written on the first inbox message)`);
+      else logger.warn(`[vortexia] mailbox snapshot ${this.file} unreadable (${err.message}) — starting with empty mailboxes`);
       return this;
     }
-    if (!data || data.version !== SNAPSHOT_VERSION || typeof data.sessions !== 'object') return this;
+    if (!data || data.version !== SNAPSHOT_VERSION || typeof data.sessions !== 'object') {
+      logger.warn(`[vortexia] mailbox snapshot ${this.file} has an unknown format (version ${data?.version}) — starting with empty mailboxes`);
+      return this;
+    }
     let restoredQueued = 0;
     for (const [clientId, session] of Object.entries(data.sessions)) {
       const subs = Array.isArray(session.subscriptions) ? session.subscriptions : [];
