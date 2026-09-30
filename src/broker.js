@@ -5,7 +5,7 @@ import Aedes from 'aedes';
 import { createServer } from 'aedes-server-factory';
 import { logger } from './logger.js';
 import { MailboxPersistence, DEFAULT_MAILBOX_CAP, DEFAULT_MAILBOX_TTL_MS } from './mailbox.js';
-import { mailboxClientId, parseInboxTopic, sessionTopic } from './topics.js';
+import { mailboxClientId, mailboxOwnerOf, parseInboxTopic, sessionTopic, MAILBOX_DROP_TOPIC, MAILBOX_DROP_RESULT_TOPIC } from './topics.js';
 import {
   bindWithPolicy,
   readStickyPorts,
@@ -124,6 +124,53 @@ export async function startBroker({
   });
   aedes.on('connectionError', (client, err) => {
     logger.warn(`[vortexia] connection error (${client?.id ?? 'unknown'}): ${err.message}`);
+  });
+
+  // Control: drop a mailbox by client id (PROTOCOL.md "Dropping a
+  // mailbox"). A session mailbox outlives its runtime until the TTL empties
+  // it; the environment that owns the session (LAS, on DELETE
+  // /sessions/<sid>) purges it with this instead of leaving a queue behind
+  // per closed terminal. Only mailbox client ids (`las-agent-…`) qualify;
+  // one with a live consumer is refused unless `force`, which disconnects
+  // it first.
+  const answerDrop = (result) => aedes.publish({
+    topic: MAILBOX_DROP_RESULT_TOPIC,
+    payload: Buffer.from(JSON.stringify({ ...result, ts: Date.now() })),
+    qos: 1,
+    retain: false,
+  }, () => {});
+  const dropMailbox = (req) => {
+    const { clientId, id = null, force = false } = req;
+    if (typeof clientId !== 'string' || !clientId.startsWith(mailboxClientId(''))) {
+      return answerDrop({ id, clientId: clientId ?? null, dropped: false, reason: 'not a mailbox client id' });
+    }
+    const live = aedes.clients[clientId];
+    if (live && !force) return answerDrop({ id, clientId, dropped: false, reason: 'connected' });
+    const drop = () => {
+      // An agent-level mailbox also clears its retained session state:
+      // an absent topic reads as "never seen, free" (see PROTOCOL.md).
+      let agentInboxOwner = null;
+      persistence.subscriptionsByClient({ id: clientId }, (err, subs) => {
+        const own = (subs || []).find((s) => mailboxOwnerOf(s.topic) === clientId && parseInboxTopic(s.topic));
+        if (own) agentInboxOwner = parseInboxTopic(own.topic);
+      });
+      persistence.dropMailbox(clientId, (err, existed) => {
+        if (err) return answerDrop({ id, clientId, dropped: false, reason: err.message });
+        // After the disconnect's own `connected: false` has gone out.
+        if (agentInboxOwner) setImmediate(() => aedes.publish({ topic: sessionTopic(agentInboxOwner), payload: Buffer.alloc(0), qos: 0, retain: true }, () => {}));
+        logger.info(`[vortexia] mailbox dropped: ${clientId}${existed ? '' : ' (was already gone)'}`);
+        answerDrop({ id, clientId, dropped: existed, ...(existed ? {} : { reason: 'no such mailbox' }) });
+      });
+    };
+    if (live) live.close(drop);
+    else drop();
+  };
+  aedes.on('publish', (packet, client) => {
+    if (!client || packet.topic !== MAILBOX_DROP_TOPIC) return;
+    let req;
+    try { req = JSON.parse(packet.payload.toString()); } catch { req = null; }
+    if (!req || typeof req !== 'object') return answerDrop({ id: null, clientId: null, dropped: false, reason: 'payload is not a JSON object' });
+    dropMailbox(req);
   });
 
   // Restored mailboxes start out with nobody connected — say so on their

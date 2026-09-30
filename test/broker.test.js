@@ -188,6 +188,28 @@ test('scope-query round trip: requester gets the rung the target hands back', as
   }
 });
 
+test('scope-reply may carry children (the sessions of the agent), one level down', async () => {
+  const broker = await startBroker();
+  const asker = new VortexiaClient({ port: broker.mqttPort });
+  const target = new VortexiaClient({ port: broker.mqttPort });
+
+  try {
+    await asker.register('AskerKids');
+    await target.register('TargetKids');
+    const children = [
+      { id: 'claude', scope: 'Claude Code session', accepts: ['message', 'command'] },
+      { id: 'shell', scope: 'plain shell', accepts: ['command'] },
+    ];
+    target.onScopeQuery(() => ({ rung: 55, source: 'short_description', text: 'a parent', children }));
+    const reply = await asker.requestScope('TargetKids', 'short');
+    assert.deepEqual(reply, { rung: 55, source: 'short_description', text: 'a parent', children });
+  } finally {
+    await asker.close();
+    await target.close();
+    await broker.close();
+  }
+});
+
 test('concurrent scope-queries to the same agent each resolve with their own reply, not the first one back', async () => {
   const broker = await startBroker();
   const asker = new VortexiaClient({ port: broker.mqttPort });

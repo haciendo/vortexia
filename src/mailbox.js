@@ -42,7 +42,7 @@ import { Readable } from 'node:stream';
 import Packet from 'aedes-packet';
 import memoryPersistence from 'aedes-persistence';
 import { logger } from './logger.js';
-import { inboxTopic, mailboxClientId, parseInboxTopic } from './topics.js';
+import { inboxTopic, mailboxClientId, mailboxOwnerOf, parseInboxTopic } from './topics.js';
 
 export const DEFAULT_MAILBOX_CAP = 500;
 export const DEFAULT_MAILBOX_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -189,8 +189,13 @@ export class MailboxPersistence {
    */
   ensureMailbox(agentName, cb = () => {}) {
     const id = mailboxClientId(agentName);
-    if (this.sessions.has(id)) return cb(null, false);
     const topic = inboxTopic(agentName);
+    // Check the subscription itself, not just "a session exists": a session
+    // that lost its inbox subscription but kept others (broadcast, speak)
+    // is still present on reconnect, so its consumer never re-subscribes —
+    // and if this trusted the session, nothing would ever be queued for
+    // that agent again (seen 2026-09-28 on las-agent-LocalAgentSociety).
+    if (this.holdsSubscription(id, topic)) return cb(null, false);
     this.inner.addSubscriptions({ id }, [{ topic, qos: 1 }], (err) => {
       if (!err) {
         this.sessions.add(id);
@@ -198,6 +203,32 @@ export class MailboxPersistence {
       }
       cb(err, !err);
     });
+  }
+
+  /** True when session `clientId` holds a QoS ≥ 1 subscription to exactly `topic`. */
+  holdsSubscription(clientId, topic) {
+    let held = false;
+    // The in-memory persistence answers synchronously.
+    this.inner.subscriptionsByClient({ id: clientId }, (err, subs) => {
+      held = !err && Array.isArray(subs) && subs.some((s) => s.topic === topic && s.qos > 0);
+    });
+    return held;
+  }
+
+  /** True when a mailbox session (subscriptions and/or queue) exists for `clientId`. */
+  hasMailbox(clientId) {
+    return this.sessions.has(clientId) || this.outgoing.has(clientId);
+  }
+
+  /**
+   * Drop the whole mailbox of `clientId` — subscriptions and queue — as a
+   * clean-session connect would. For sessions whose runtime is gone for
+   * good; the caller makes sure no consumer holds it. Calls back with
+   * whether anything was there.
+   */
+  dropMailbox(clientId, cb = () => {}) {
+    const existed = this.hasMailbox(clientId);
+    this.cleanSubscriptions({ id: clientId }, (err) => cb(err, existed));
   }
 
   /** How many messages are waiting for `agentName`. */
@@ -303,6 +334,14 @@ export class MailboxPersistence {
   }
 
   removeSubscriptions(client, subs, cb) {
+    // A mailbox's own inbox subscription belongs to the mailbox, not to
+    // whichever consumer is attached: an UNSUBSCRIBE of it only stops live
+    // delivery on that connection, the session keeps queueing. Otherwise a
+    // consumer that unsubscribes on shutdown leaves a session that is
+    // "present" on reconnect yet receives nothing. To really get rid of a
+    // mailbox: a clean-session connect, or the drop control (dropMailbox).
+    subs = subs.filter((topic) => mailboxOwnerOf(topic) !== client.id);
+    if (!subs.length) return process.nextTick(cb, null, client);
     this.inner.removeSubscriptions(client, subs, (err, c) => {
       if (!err) this._scheduleFlush();
       cb(err, c);

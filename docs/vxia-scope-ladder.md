@@ -1,9 +1,8 @@
 # The `.vxia-scope` ladder protocol
 
-**Status: specified, not implemented.** No scanning code exists yet — this
-is the canonical definition for whoever builds it (see
-`future-las-agent-scope-router.md` in this same folder for the router work
-that consumes it). This doc is intentionally independent of any one
+**Status: the file scan is implemented** (`scanScopes()` in `src/scope.js`,
+CLI `vortexia scope scan <dir>`); routing on top of it is not (see
+`future-las-agent-scope-router.md` in this same folder). This doc is intentionally independent of any one
 consumer's internals — it does not assume `local-agent-society`,
 `.las-agent.json`, or any particular project layout. Any project that wants
 its agent/service discoverable and routable by vortexia can adopt it.
@@ -56,6 +55,26 @@ short README lands on an early rung; a long one lands on a later rung.
 There's no dedicated "README rung" — it slots into the ladder wherever its
 real size puts it, small or large.
 
+## A pointer list instead of a glob: `scope_docs`
+
+A consumer may keep, in its own config, an ordered list of the docs that
+identify it — most specific first, paths relative to its directory (LAS:
+`scope_docs` in `.las-agent.json`, see its `docs/adr/0001` addendum). It is
+only a pointer list: it says *which* files are the agent's scope docs, not
+what rung they are. Each listed doc still gets its rung from the rules in
+this document (`.vxia-scope.<N>.md` → `N`; anything else, README included →
+the smallest Fibonacci number ≥ its length), and collisions still resolve
+as below, in list order where the list is the only source.
+
+A scanner should read that list when it is present and fall back to the
+directory scan (`.vxia-scope.*.md` ascending, then README) when it is
+absent. An empty list is a statement, not a missing value: the agent's
+inline rungs say all there is to say, so don't glob behind its back.
+
+The same ladder goes one level down for an agent's sessions (PROTOCOL.md
+"Sessions"): a session's `title` (~34 chars) is its rung 0, and its
+per-runtime `scope` line is its rung 1.
+
 ## Rung collisions
 
 A collision is two different files mapping to the same rung number — e.g.
@@ -72,15 +91,13 @@ up to 144. Resolution:
 3. Nothing is deleted or modified. The loser just isn't returned when that
    rung is requested.
 
-## Future: `scanScopes()` and routing
+## `scanScopes()` and future routing
 
-Not implemented. Sketch, for whoever builds it:
-
-- A function (working name `scanScopes(dir)`, exported from vortexia's JS
-  client — CLI equivalent `vortexia scope scan <dir>`) that reads a
-  directory, finds every `.vxia-scope.<N>.md` plus any README, computes the
-  README's rung, applies the collision rule above, and returns an ordered
-  list of `{ rung, source, text }` entries — one per resolved rung.
+- `scanScopes(dir)` (`src/scope.js`, CLI `vortexia scope scan <dir>`) reads
+  a directory, finds every `.vxia-scope.<N>.md` plus any README, computes
+  the README's rung, applies the collision rule above, and returns an
+  ordered list of `{ rung, source, text }` entries — one per resolved rung.
+  It does not read `scope_docs` yet (see above).
 - A vortexia router publishes each known agent's scanned ladder (at least
   its first rung or two) so it can answer "who handles X" queries, and,
   per-agent, answer "give me your rung-N text" / "a bit more" requests by
@@ -95,7 +112,11 @@ Not implemented. Sketch, for whoever builds it:
   enough (not a duplicate) or both sides run out of rungs to compare
   (likely a genuine duplicate). The rung depth reached before ruling
   in/out is itself useful signal: "matched through rung N" is a confidence
-  level, not just a yes/no.
+  level, not just a yes/no. When both sides are agents with sessions
+  (`scope-reply.children`, PROTOCOL.md), the same walk can go one level
+  *down* instead — agent → session — and a child that only `accepts:
+  ["command"]` (a plain shell) is only ever a candidate for
+  `kind: "command"`.
 - The same progressive-depth idea applies to **message routing without a
   named recipient**: a message that says "I need help with X" (no target
   agent) gets compared against known agents' ladders at increasing rung

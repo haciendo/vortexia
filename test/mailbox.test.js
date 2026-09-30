@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { startBroker } from '../src/broker.js';
-import { VortexiaClient, pollInbox, sessionState } from '../src/client.js';
-import { inboxTopic, presenceTopic } from '../src/topics.js';
+import { VortexiaClient, pollInbox, sessionState, dropMailbox } from '../src/client.js';
+import { inboxTopic, presenceTopic, sessionInboxTopic, sessionMailboxClientId, mailboxClientId } from '../src/topics.js';
 import mqtt from 'mqtt';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -200,6 +200,109 @@ test('pollInbox does not touch presence: an agent registered "online" still read
     assert.equal(presence, 'online');
   } finally {
     registrar.end(true);
+    await broker.close();
+  }
+});
+
+// Raw persistent-session consumer: resolves once the backlog had a moment to arrive.
+async function rawConsumer(port, clientId, { clean = false } = {}) {
+  const c = mqtt.connect(`mqtt://localhost:${port}`, { clientId, clean, reconnectPeriod: 0 });
+  const got = [];
+  c.on('message', (topic, payload) => got.push(`${topic}|${payload}`));
+  const ack = await new Promise((r, j) => { c.once('connect', r); c.once('error', j); });
+  return { c, got, sessionPresent: ack.sessionPresent };
+}
+const publishOnce = async (port, topic, text) => {
+  const p = mqtt.connect(`mqtt://localhost:${port}`, { clientId: 'pub-' + Math.random().toString(16).slice(2), reconnectPeriod: 0 });
+  await new Promise((r, j) => { p.once('connect', r); p.once('error', j); });
+  await p.publishAsync(topic, text, { qos: 1 });
+  await p.endAsync();
+};
+
+test('a consumer unsubscribing its own inbox does not leave a present-but-deaf session (2026-09-28 regression)', async () => {
+  const broker = await startBroker({ dataDir: tmpDir(), persist: false });
+  const topic = inboxTopic('MbDeaf9');
+  try {
+    let { c } = await rawConsumer(broker.mqttPort, mailboxClientId('MbDeaf9'));
+    await c.subscribeAsync(topic, { qos: 1 });
+    await c.subscribeAsync('las/broadcast', { qos: 0 });
+    await c.unsubscribeAsync(topic); // e.g. a bridge tidying up on shutdown
+    await c.endAsync();
+
+    await publishOnce(broker.mqttPort, topic, 'while away');
+    assert.equal(broker.persistence.queuedFor('MbDeaf9'), 1, 'still queued: the inbox subscription belongs to the mailbox');
+
+    const again = await rawConsumer(broker.mqttPort, mailboxClientId('MbDeaf9'));
+    assert.equal(again.sessionPresent, true);
+    await publishOnce(broker.mqttPort, topic, 'live');
+    await sleep(150);
+    assert.deepEqual(again.got, [`${topic}|while away`, `${topic}|live`]);
+    await again.c.endAsync();
+  } finally {
+    await broker.close();
+  }
+});
+
+test('ensureMailbox re-provisions a session that lost its inbox subscription but kept others', async () => {
+  const broker = await startBroker({ dataDir: tmpDir(), persist: false });
+  const id = mailboxClientId('MbHalf10');
+  const topic = inboxTopic('MbHalf10');
+  try {
+    // A session holding only broadcast (as a restore of an older snapshot could leave it).
+    await new Promise((r) => broker.persistence.addSubscriptions({ id }, [{ topic: 'las/broadcast', qos: 0 }], r));
+    assert.equal(broker.persistence.holdsSubscription(id, topic), false);
+    await publishOnce(broker.mqttPort, topic, 'hello');
+    assert.equal(broker.persistence.holdsSubscription(id, topic), true);
+    assert.equal(broker.persistence.queuedFor('MbHalf10'), 1);
+  } finally {
+    await broker.close();
+  }
+});
+
+test('mailbox drop: a session mailbox and its queue go away; the snapshot forgets it; publishes do not revive it', async () => {
+  const dataDir = tmpDir();
+  const broker = await startBroker({ dataDir });
+  const id = sessionMailboxClientId('MbParent11', 's1');
+  const topic = sessionInboxTopic('MbParent11', 's1');
+  try {
+    const { c } = await rawConsumer(broker.mqttPort, id);
+    await c.subscribeAsync(topic, { qos: 1 });
+    await c.endAsync();
+    await publishOnce(broker.mqttPort, topic, 'orphan');
+    assert.equal((broker.persistence.outgoing.get(id) || []).length, 1);
+
+    assert.deepEqual(await dropMailbox(id, { port: broker.mqttPort }), { clientId: id, dropped: true });
+    assert.equal(broker.persistence.hasMailbox(id), false);
+    broker.persistence.flush();
+    const snap = JSON.parse(fs.readFileSync(path.join(dataDir, 'mailboxes.json'), 'utf8'));
+    assert.equal(snap.sessions[id], undefined);
+
+    await publishOnce(broker.mqttPort, topic, 'late');
+    assert.equal(broker.persistence.hasMailbox(id), false, 'session inboxes are not auto-provisioned');
+    assert.deepEqual(await dropMailbox(id, { port: broker.mqttPort }), { clientId: id, dropped: false, reason: 'no such mailbox' });
+  } finally {
+    await broker.close();
+  }
+});
+
+test('mailbox drop: refused for a live consumer unless forced, and for non-mailbox client ids', async () => {
+  const broker = await startBroker({ dataDir: tmpDir(), persist: false });
+  const id = mailboxClientId('MbLive12');
+  try {
+    const { c } = await rawConsumer(broker.mqttPort, id);
+    await c.subscribeAsync(inboxTopic('MbLive12'), { qos: 1 });
+    assert.deepEqual(await dropMailbox(id, { port: broker.mqttPort }), { clientId: id, dropped: false, reason: 'connected' });
+    assert.equal(broker.persistence.hasMailbox(id), true);
+
+    assert.deepEqual(await dropMailbox(id, { port: broker.mqttPort, force: true }), { clientId: id, dropped: true });
+    assert.equal(broker.persistence.hasMailbox(id), false);
+    await sleep(50);
+    assert.equal(c.connected, false, 'forced drop disconnected the consumer');
+    c.end(true);
+
+    const bad = await dropMailbox('some-viewer', { port: broker.mqttPort });
+    assert.deepEqual(bad, { clientId: 'some-viewer', dropped: false, reason: 'not a mailbox client id' });
+  } finally {
     await broker.close();
   }
 });

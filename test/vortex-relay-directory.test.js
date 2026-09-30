@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { InMemoryRelay } from '../src/vortex-relay/relay.js';
-import { publishDirectory, mergeDirectories, resolveDirectoryName } from '../src/vortex-relay/directory.js';
+import { publishDirectory, mergeDirectories, resolveDirectoryName, splitSessionSelector } from '../src/vortex-relay/directory.js';
 
 test('mergeDirectories combines every published environment, skipping ones that never published', async () => {
   const relay = new InMemoryRelay();
@@ -67,4 +67,12 @@ test('resolveDirectoryName: unknown name (bare or qualified) is not-found', () =
   const entries = [{ envName: 'env-a', agentName: 'Clima', scopeText: 'tiempo' }];
   assert.deepEqual(resolveDirectoryName('Ghost', 'env-a', entries), { status: 'not-found' });
   assert.deepEqual(resolveDirectoryName('Ghost@env-a', 'env-b', entries), { status: 'not-found' });
+});
+
+test('splitSessionSelector: the part after the first "/" is carried, never routed on', () => {
+  assert.deepEqual(splitSessionSelector('System'), { address: 'System', session: null });
+  assert.deepEqual(splitSessionSelector('System@uy-mac'), { address: 'System@uy-mac', session: null });
+  assert.deepEqual(splitSessionSelector('System@uy-mac/claude'), { address: 'System@uy-mac', session: 'claude' });
+  assert.deepEqual(splitSessionSelector('System/*'), { address: 'System', session: '*' });
+  assert.deepEqual(splitSessionSelector('System/'), { address: 'System', session: null });
 });

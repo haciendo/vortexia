@@ -95,6 +95,23 @@ export async function mergeDirectories(relay, envNames) {
 }
 
 /**
+ * Split an address `Name[@env][/<session>]` (PROTOCOL.md "Sessions") into
+ * the part vortex-relay routes on and the session selector it only carries.
+ * Everything after the first `/` — a session id, a runtime (`claude`,
+ * `codex`, `shell`) or `*` — is resolved by the owning environment's
+ * backend, which holds the session registry; vortex-relay never interprets
+ * it. Agent names are topic segments, so they never contain `/`.
+ *
+ * @param {string} to
+ * @returns {{address: string, session: string|null}}
+ */
+export function splitSessionSelector(to) {
+  const slash = to.indexOf('/');
+  if (slash < 0) return { address: to, session: null };
+  return { address: to.slice(0, slash), session: to.slice(slash + 1) || null };
+}
+
+/**
  * Resolve a `to` addressee for exact-name, point-to-point delivery.
  * Accepts either a bare name ("System") or an env-qualified one
  * ("System@uy-mac"). Never guesses across a same-name collision:

@@ -59,6 +59,7 @@ export class DirectConnection {
         kind: 'vortex-relay-delivery',
         routedFrom: routed.routedFrom,
         transport: this.transport.name,
+        ...(routed.session ? { session: routed.session } : {}),
       });
     }
   }

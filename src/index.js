@@ -7,7 +7,7 @@ import { startBroker, defaultDataDir } from './broker.js';
 import { scanScopes } from './scope.js';
 import { logger } from './logger.js';
 import { startLoopWatchdog } from './watchdog.js';
-import { VortexiaClient } from './client.js';
+import { VortexiaClient, dropMailbox } from './client.js';
 import { VortexRelayBridge } from './vortex-relay/bridge.js';
 import { GistRelay, NostrRelay, MultiRelay } from './vortex-relay/relay.js';
 import { discoverLocalRoster } from './vortex-relay/localRoster.js';
@@ -269,6 +269,23 @@ function cmdScopeScan(dir) {
   }
 }
 
+async function cmdMailboxDrop(args) {
+  const force = args.includes('--force');
+  const clientId = args.find((a) => !a.startsWith('--'));
+  if (!clientId) {
+    console.log('Usage: vortexia mailbox drop <clientId> [--force]');
+    process.exit(1);
+  }
+  try {
+    const result = await dropMailbox(clientId, { force });
+    console.log(result.dropped ? `dropped ${clientId}` : `not dropped ${clientId}: ${result.reason}`);
+    process.exit(result.dropped || result.reason === 'no such mailbox' ? 0 : 1);
+  } catch (err) {
+    console.error(`vortexia: ${err.message}`);
+    process.exit(1);
+  }
+}
+
 const cmd = process.argv[2];
 
 switch (cmd) {
@@ -289,7 +306,15 @@ switch (cmd) {
       process.exit(1);
     }
     break;
+  case 'mailbox':
+    if (process.argv[3] === 'drop') {
+      cmdMailboxDrop(process.argv.slice(4));
+    } else {
+      console.log('Usage: vortexia mailbox drop <clientId> [--force]');
+      process.exit(1);
+    }
+    break;
   default:
-    console.log('Usage: vortexia <start|stop|status|scope scan <dir>>');
+    console.log('Usage: vortexia <start|stop|status|scope scan <dir>|mailbox drop <clientId> [--force]>');
     process.exit(cmd ? 1 : 0);
 }

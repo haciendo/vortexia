@@ -185,6 +185,28 @@ test('exact-name delivery: an env-qualified name (name@env) resolves exactly eve
   }
 });
 
+test('exact-name delivery: a session selector (name@env/<session>) routes on name@env and arrives as envelope.session', async () => {
+  const relay = new InMemoryRelay();
+  const asker = await setupEnv('mac-1', { Robotics: 'brazos' }, relay);
+  const b = await setupEnv('mac-2', { System: 'sysadmin de mac-2' }, relay);
+  await asker.bridge.syncDirectory();
+
+  try {
+    const got = waitForMessage(b.clients.System, (e) => e.kind === 'vortex-relay-delivery');
+    asker.gateway.send('mac-1-gateway', 'uptime', {
+      kind: VORTEX_RELAY_DIRECT_KIND,
+      from: 'Robotics',
+      to: 'System@mac-2/shell',
+    });
+    const msg = await got;
+    assert.equal(msg.text, 'uptime');
+    assert.equal(msg.to, 'System');
+    assert.equal(msg.session, 'shell');
+  } finally {
+    await teardown(asker, b);
+  }
+});
+
 test('exact-name delivery: an unknown name replies with a not-found error', async () => {
   const relay = new InMemoryRelay();
   const asker = await setupEnv('mac-1', { Robotics: 'brazos' }, relay);

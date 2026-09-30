@@ -16,6 +16,8 @@ import {
   SCOPE_REPLY_KIND,
   buildScopeQueryEnvelope,
   buildScopeReplyEnvelope,
+  MAILBOX_DROP_TOPIC,
+  MAILBOX_DROP_RESULT_TOPIC,
 } from './topics.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -271,7 +273,7 @@ export class VortexiaClient extends EventEmitter {
         ) {
           clearTimeout(timer);
           this.removeListener('message', onMessage);
-          resolve({ rung: env.rung, source: env.scopeSource, text: env.text });
+          resolve({ rung: env.rung, source: env.scopeSource, text: env.text, ...(Array.isArray(env.children) ? { children: env.children } : {}) });
         }
       };
       const timer = setTimeout(() => {
@@ -286,8 +288,10 @@ export class VortexiaClient extends EventEmitter {
 
   /**
    * Register this client as an answerer for incoming scope-query messages.
-   * `handler(detail, envelope)` should return `{ rung, source, text }` (or
-   * a falsy value to decline answering) — how it picks a rung for a given
+   * `handler(detail, envelope)` should return `{ rung, source, text }`,
+   * optionally with `children: [{ id, scope, accepts }]` (the agent's
+   * sessions — PROTOCOL.md "Sessions"), or a falsy value to decline
+   * answering — how it picks a rung for a given
    * `detail` is entirely up to the caller (e.g. walking scanScopes()
    * output, merged with local-agent-society's own name/short_description/
    * long_description fields). vortexia only carries the request/reply.
@@ -314,6 +318,7 @@ export class VortexiaClient extends EventEmitter {
         rung: result.rung,
         scopeSource: result.source,
         text: result.text,
+        children: result.children,
       });
       this.mqttClient.publish(inboxTopic(envelope.from), JSON.stringify(reply), { qos: 1, retain: false });
     };
@@ -385,6 +390,46 @@ export async function sessionState(name, { host = 'localhost', port, timeoutMs =
       });
       client.subscribe(sessionTopic(name), { qos: 0 });
     });
+  } finally {
+    await new Promise((resolve) => client.end(true, {}, resolve));
+  }
+}
+
+/**
+ * Drop a mailbox — its persistent session and everything queued in it —
+ * by client id (`las-agent-<name>` or a session's `las-agent-<name>-<sid>`).
+ * For a session whose runtime is gone for good. Resolves the broker's
+ * answer `{ clientId, dropped, reason? }`; a mailbox with a live consumer
+ * is refused (`reason: 'connected'`) unless `force`, which disconnects it.
+ */
+export async function dropMailbox(clientId, { host = 'localhost', port, force = false, timeoutMs = 2000 } = {}) {
+  const resolvedPort = await resolvePort(port);
+  const client = mqtt.connect(`mqtt://${host}:${resolvedPort}`, {
+    clientId: `vortexia-drop-${Math.random().toString(16).slice(2)}`,
+    clean: true,
+    reconnectPeriod: 0,
+  });
+  const id = crypto.randomUUID();
+  try {
+    await new Promise((resolve, reject) => {
+      client.once('connect', resolve);
+      client.once('error', reject);
+    });
+    const answer = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`no answer from the broker to dropping ${clientId} within ${timeoutMs}ms`)), timeoutMs);
+      client.on('message', (topic, payload) => {
+        if (topic !== MAILBOX_DROP_RESULT_TOPIC) return;
+        let result;
+        try { result = JSON.parse(payload.toString()); } catch { return; }
+        if (result.id !== id) return;
+        clearTimeout(timer);
+        const { id: _id, ts: _ts, ...rest } = result;
+        resolve(rest);
+      });
+    });
+    await client.subscribeAsync(MAILBOX_DROP_RESULT_TOPIC, { qos: 1 });
+    await client.publishAsync(MAILBOX_DROP_TOPIC, JSON.stringify({ clientId, id, force }), { qos: 1 });
+    return await answer;
   } finally {
     await new Promise((resolve) => client.end(true, {}, resolve));
   }

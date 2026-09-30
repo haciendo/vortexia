@@ -10,7 +10,7 @@
 // agent(s).
 
 import { pickTargets } from './router.js';
-import { publishDirectory, mergeDirectories, resolveDirectoryName } from './directory.js';
+import { publishDirectory, mergeDirectories, resolveDirectoryName, splitSessionSelector } from './directory.js';
 import { DirectMqttTransport } from './directTransport.js';
 import { ConnectionRouter, LocalConnection, DirectConnection, RelayConnection } from './connection.js';
 
@@ -195,6 +195,7 @@ export class VortexRelayBridge {
         kind: 'vortex-relay-delivery',
         routedFrom: routed.routedFrom,
         transport: routed.transport ?? 'unknown',
+        ...(routed.session ? { session: routed.session } : {}),
       });
     }
   }
@@ -210,7 +211,9 @@ export class VortexRelayBridge {
    * silently dropped or guessed at.
    */
   async _onDirectMessage(envelope) {
-    const resolved = resolveDirectoryName(envelope.to, this.envName, this._mergedEntries);
+    // `Name@env/<session>`: route on `Name@env`, carry the selector as-is.
+    const { address, session } = splitSessionSelector(envelope.to);
+    const resolved = resolveDirectoryName(address, this.envName, this._mergedEntries);
 
     if (resolved.status === 'not-found') {
       this._replyDirectError(envelope, `no agent named "${envelope.to}" is known across vortex-relay`);
@@ -228,6 +231,7 @@ export class VortexRelayBridge {
       from: envelope.from,
       text: envelope.text,
       agentNames: [resolved.agentName],
+      ...(session ? { session } : {}),
       routedFrom: this.envName,
       ts: Date.now(),
     };

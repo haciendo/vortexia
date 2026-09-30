@@ -12,6 +12,9 @@ client (paho-mqtt, mqtt.js, mosquitto_pub, etc.) can speak it.
 | `las/broadcast` | Message to all agents | 1 | no |
 | `las/agent/<name>/presence` | Online/offline status for `<name>` | 1 | **yes** |
 | `las/agent/<name>/session` | Broker-published: is `<name>`'s mailbox consumer connected right now? | 0 | **yes** |
+| `las/agent/<name>/sessions/<sid>/inbox` | Direct message to one **session** of an agent — its own mailbox (see "Sessions") | 1 | no |
+| `las/agent/<name>/default-session` | Environment-published: which session holds the agent-level mailbox | 1 | **yes** |
+| `vortexia/control/mailbox/drop` (+ `/result`) | Drop a mailbox by client id (see "Dropping a mailbox") | 1 | no |
 
 `<name>` is an agent name, matching the `name` field in that agent's
 `.agent.json` (see local-agent-society's `CLAUDE.md`).
@@ -76,10 +79,16 @@ overwriting anything.
   whole backlog (the broker's CONNACK says `session present`), then live
   messages; each one is consumed by being acknowledged (QoS 1 PUBACK — what
   every MQTT client library does automatically once the message handler
-  returns). There is no separate "clear" step. Subscribe to the inbox only
-  when CONNACK reports *no* session present — otherwise the subscription is
-  already part of the session, and re-subscribing would only replay a
-  retained message if some pre-mailbox sender left one on the topic.
+  returns). There is no separate "clear" step. The inbox subscription
+  belongs to the **mailbox**, not to the consumer: the broker restores it
+  with the session, and an UNSUBSCRIBE of a mailbox's own inbox only stops
+  live delivery on that one connection — the session keeps it and keeps
+  queueing. (Before 2026-09-30 an unsubscribe really removed it, leaving a
+  session that CONNACK called present but that received nothing, not even
+  new publishes, until someone subscribed again.) Subscribing again on
+  every connect is therefore harmless, and a fine guard; the only side
+  effect is replaying a retained message some pre-mailbox sender may have
+  left on the topic.
   Subscribe to `las/broadcast` and `las/speak` at **QoS 0** from this
   session: live-only, never queued for an offline agent.
 - **Exactly one consumer at a time.** A second connection with the same
@@ -133,6 +142,84 @@ overwriting anything.
 Reference implementations: `VortexiaClient.register(name, { mailbox: true })`,
 `pollInbox()` and `sessionState()` in `src/client.js`; the same three in
 `python/vortexia_client.py`.
+
+## Sessions (nested mailboxes)
+
+An agent may have several runtimes attached at once — a Claude session, a
+Codex, a plain shell. Each is a **session**, a child of the agent, with a
+mailbox of its own. The agent mailbox above is the parent queue; the same
+rules apply one level down. vortexia owns the topic schema below;
+environments (local-agent-society) adopt it and own the session registry.
+
+- **Session mailbox**: topic `las/agent/<name>/sessions/<sid>/inbox`,
+  persistent client id `las-agent-<name>-<sid>`, consumed exactly like an
+  agent mailbox (clean session = false, QoS 1, acknowledge to consume; cap,
+  TTL and snapshot all apply). `<sid>` is chosen by the environment and is
+  a single topic segment (no `/`, `+`, `#`).
+- **Not created on first publish.** Unlike the agent inbox, the broker
+  does not provision a session mailbox when someone publishes to it: it
+  exists once its consumer has connected and subscribed. A publish to a
+  session nobody ever opened (or one that was dropped) goes nowhere — that
+  is what keeps a dropped mailbox dropped.
+- **Default session**: `las/agent/<name>/default-session`, retained JSON,
+  published by the environment's backend (never by the broker):
+
+  ```json
+  { "sid": "claude-67882-2a1825", "runtime": "claude", "ts": 1787958159823 }
+  ```
+
+  It names the session whose bridge consumes the agent-level mailbox
+  (`las-agent-<name>`), so a plain message to the agent reaches that
+  session. An absent topic means the environment has not picked one.
+- **Viewers** of an agent that want session traffic too subscribe
+  `las/agent/<name>/sessions/+/inbox` alongside the agent inbox, with a
+  clean session as before — viewing never consumes.
+
+### Addressing a session
+
+```
+Name[@env][/<selector>]      selector = <sid> | <runtime> | *
+```
+
+- A plain address (`Name`, `Name@env`) reaches the agent's default session;
+  `/*` fans out to every session; `/<runtime>` (`claude`, `codex`, `shell`)
+  or `/<sid>` reaches only that one.
+- **vortex-relay routes on `Name@env` only.** Everything after the first
+  `/` is carried untouched to the owning environment, never interpreted:
+  a direct message to `System@uy-mac/shell` is delivered into
+  `las/agent/System/inbox` on `uy-mac` with `"session": "shell"` added to
+  the envelope, and that environment's backend (which holds the session
+  registry) resolves the selector. Agent names never contain `/`.
+- Locally, an environment that already knows the session publishes
+  straight to its session inbox; `session` on an agent-inbox envelope is
+  the cross-environment form of the same request.
+
+### Dropping a mailbox
+
+A session mailbox outlives its runtime until the TTL empties it. The
+environment that owns the session drops it when the session is gone for
+good (LAS: on `DELETE /sessions/<sid>`):
+
+```json
+// publish to vortexia/control/mailbox/drop
+{ "clientId": "las-agent-LocalAgentSociety-claude-67882-2a1825", "id": "b3f1...", "force": false }
+// the broker answers on vortexia/control/mailbox/drop/result
+{ "id": "b3f1...", "clientId": "las-agent-...", "dropped": true, "ts": 1787958159823 }
+```
+
+- Removes the persistent session — subscriptions and queue — exactly as a
+  clean-session connect with that client id would, and forgets it in the
+  snapshot.
+- Only mailbox client ids (`las-agent-…`) qualify (`reason: "not a mailbox
+  client id"`). One with a live consumer is refused (`reason: "connected"`)
+  unless `force: true`, which disconnects the consumer first. Nothing there
+  answers `dropped: false, reason: "no such mailbox"`.
+- Dropping an **agent** mailbox also clears its retained
+  `las/agent/<name>/session`; the next publish to its inbox creates it
+  afresh, as for a brand-new agent.
+- `id` is echoed back so concurrent requests can be told apart. Reference
+  implementation: `dropMailbox(clientId, { force })` in `src/client.js`;
+  CLI `vortexia mailbox drop <clientId> [--force]`.
 
 ## Connecting
 
@@ -239,6 +326,13 @@ Reply (published to the *requester's* inbox):
   query already timed out, each resolve the *correct* pending promise
   instead of the first matching reply satisfying whichever `requestScope()`
   call happened to still be listening.
+- `children` — (optional) the agent's sessions, one level down:
+  `[{ "id": "shell", "scope": "plain shell: literal commands only", "accepts": ["command"] }]`.
+  `id` is a runtime or sid usable as an address selector (see "Sessions"),
+  `scope` its one-line description, `accepts` which `kind`s it takes
+  (`"message"`, `"command"`). Lets progressive-depth matching go *down*
+  from agent to session: a child accepting only `"command"` is only ever a
+  match for `kind: "command"`. `requestScope()` returns it when present.
 - `rung` / `scopeSource` — which ladder rung the reply came from and where
   that rung's text came from (e.g. a `.las-agent.json` field name or a
   `.vxia-scope.<N>.md` filename), so the requester can ask for "a bit more"
