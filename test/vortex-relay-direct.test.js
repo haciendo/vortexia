@@ -92,7 +92,7 @@ test('exact-name delivery crosses to the owning environment, bypassing scope mat
 
     const msg = await got;
     assert.equal(msg.text, 'necesito ver la factura de este mes');
-    assert.equal(msg.from, 'Robotics');
+    assert.equal(msg.from, 'Robotics@mac-1', 'a remote sender arrives qualified so it never reads as a local name');
     assert.equal(msg.routedFrom, 'mac-1');
   } finally {
     await teardown(a, b);
@@ -225,5 +225,42 @@ test('exact-name delivery: an unknown name replies with a not-found error', asyn
     assert.match(err.text, /no agent named "Ghost"/);
   } finally {
     await teardown(asker);
+  }
+});
+
+test('a delivery received from X@E teaches the bridge X@E, so a reply resolves even when E\'s directory is missing X', async () => {
+  const relay = new InMemoryRelay();
+  const a = await setupEnv('mac-1', { Alpha: 'alpha' }, relay);
+  const b = await setupEnv('mac-2', { Beta: 'beta' }, relay);
+  // Ghost never published a directory entry on mac-1: resolving Ghost@mac-1
+  // from mac-2 would be not-found without the learned entry.
+  try {
+    assert.equal(b.bridge._resolveEntries().some((e) => e.agentName === 'Ghost'), false);
+    b.bridge._learnSender('Ghost', 'mac-1');
+    const resolved = b.bridge._resolveEntries().find((e) => e.agentName === 'Ghost' && e.envName === 'mac-1');
+    assert.ok(resolved, 'learned entry is searched by resolution');
+    b.bridge._learned.get('Ghost@mac-1').expires = Date.now() - 1;
+    assert.equal(b.bridge._resolveEntries().some((e) => e.agentName === 'Ghost'), false, 'expired entries drop out');
+  } finally {
+    await teardown(a, b);
+  }
+});
+
+test('startDirectorySync re-reads a roster function every tick and republishes only on change', async () => {
+  const relay = new InMemoryRelay();
+  const a = await setupEnv('mac-1', { Alpha: 'alpha' }, relay);
+  const published = [];
+  a.bridge.publishSelf = async (roster) => { published.push(roster.map((r) => r.agentName)); };
+  let roster = [];
+  a.bridge.startDirectorySync(async () => roster, { publishIntervalMs: 3600000, syncIntervalMs: 30 });
+  try {
+    await new Promise((r) => setTimeout(r, 120));
+    roster = [{ agentName: 'Late', scopeText: 'late' }];
+    await new Promise((r) => setTimeout(r, 150));
+    const lateCount = published.filter((p) => p.includes('Late')).length;
+    assert.equal(lateCount, 1, 'late agent is published once, not on every tick');
+  } finally {
+    a.bridge.stopDirectorySync();
+    await teardown(a);
   }
 });

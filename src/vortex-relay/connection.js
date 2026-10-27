@@ -55,7 +55,7 @@ export class DirectConnection {
   async deliver(envName, routed) {
     for (const agentName of routed.agentNames) {
       await this.transport.send(agentName, routed.text ?? routed.intent, {
-        from: routed.from,
+        from: qualifySender(routed.from, routed.routedFrom, envName),
         kind: 'vortex-relay-delivery',
         routedFrom: routed.routedFrom,
         transport: this.transport.name,
@@ -169,4 +169,10 @@ export class ConnectionRouter {
     }
     throw lastErr ?? new Error(`ConnectionRouter: no available connection for "${envName}"`);
   }
+}
+
+/** `System` from another env is not the local `System`: qualify a bare sender as `Name@routedFrom`. */
+export function qualifySender(from, routedFrom, localEnvName) {
+  if (!from || !routedFrom || routedFrom === localEnvName || from.includes('@')) return from;
+  return `${from}@${routedFrom}`;
 }

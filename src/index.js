@@ -172,12 +172,21 @@ async function startVortexRelay(mqttPort, wsPort) {
   const stopGateway = async () => { gatewayStopping = true; clearTimeout(gatewayTimer); await gateway.close(); };
 
   const bridge = new VortexRelayBridge({ envName, relay, envNames, seenFile: path.join(defaultDataDir(), `relay-seen-${envName}.json`) }).attach(gateway);
-  const roster = await discoverLocalRoster();
+  // Re-read on every publish tick (see startDirectorySync): the LAS backend
+  // may come up after vortexia, and agents register late. A failed read
+  // returns [] — keep the last non-empty roster rather than publishing an
+  // empty one over it.
+  let roster = await discoverLocalRoster();
+  const rosterSource = async () => {
+    const fresh = await discoverLocalRoster();
+    if (fresh.length || !roster.length) roster = fresh;
+    return roster;
+  };
   // See bridge.js's startDirectorySync doc comment: publish (a Gist write)
   // hits GitHub's 100/hour gist_update secondary limit shared across every
   // environment using the same token, so it stays well below that; sync
   // (a read) doesn't share that budget and can run far more often.
-  bridge.startDirectorySync(roster, { publishIntervalMs: 300000, syncIntervalMs: 15000 });
+  bridge.startDirectorySync(rosterSource, { publishIntervalMs: 300000, syncIntervalMs: 15000 });
   bridge.startPolling(1000);
   const lan = await startLanDiscovery(bridge, { envName, mqttPort, wsPort });
 

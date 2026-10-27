@@ -15,7 +15,7 @@ import crypto from 'node:crypto';
 import { pickTargets } from './router.js';
 import { publishDirectory, mergeDirectories, resolveDirectoryName, splitSessionSelector } from './directory.js';
 import { DirectMqttTransport } from './directTransport.js';
-import { ConnectionRouter, LocalConnection, DirectConnection, RelayConnection } from './connection.js';
+import { ConnectionRouter, LocalConnection, DirectConnection, RelayConnection, qualifySender } from './connection.js';
 
 export const VORTEX_RELAY_KIND = 'vortex-relay-intent';
 
@@ -38,6 +38,8 @@ export function relayMessageKey(m) {
   if (m && typeof m.id === 'string' && m.id) return `id:${m.id}`;
   return `sha:${crypto.createHash('sha256').update(JSON.stringify(m)).digest('hex')}`;
 }
+
+const LEARNED_TTL_MS = 6 * 60 * 60 * 1000;
 
 export class VortexRelayBridge {
   /**
@@ -92,6 +94,11 @@ export class VortexRelayBridge {
     // What resolveDirectoryName() searches — starts as the static seed,
     // widened by syncDirectory() once it's run at least once.
     this._mergedEntries = directory;
+    // Agents proven to exist by a delivery we received (X, routedFrom E ⇒
+    // X@E exists) even though E's published directory is stale or missing
+    // them. key `X@E` -> {envName, agentName, scopeText, expires}. Folded
+    // into resolution by _resolveEntries(), expired lazily.
+    this._learned = new Map();
     this._syncGeneration = 0;
     // Live DirectTransport per peer envName — see directTransport.js.
     // Populated by attachDirectTransport() (directly, or via
@@ -217,15 +224,50 @@ export class VortexRelayBridge {
   // human reading the widget (or another agent) can see which channel
   // carried a given message, not just that it arrived.
   _deliverLocally(routed) {
+    const from = this._qualifySender(routed.from, routed.routedFrom);
+    this._learnSender(routed.from, routed.routedFrom);
     for (const agentName of routed.agentNames) {
       this.localClient.send(agentName, routed.text ?? routed.intent, {
-        from: routed.from,
+        from,
         kind: 'vortex-relay-delivery',
         routedFrom: routed.routedFrom,
         transport: routed.transport ?? 'unknown',
         ...(routed.session ? { session: routed.session } : {}),
       });
     }
+  }
+
+  /**
+   * `System` from another env is not the local `System`: qualify a bare
+   * sender as `Name@routedFrom` so same-named agents on different Macs
+   * don't read as from == to == own name. Already-qualified senders and
+   * local deliveries are left alone.
+   */
+  _qualifySender(from, routedFrom) {
+    return qualifySender(from, routedFrom, this.envName);
+  }
+
+  /** A received delivery proves `from@routedFrom` exists — remember it for LEARNED_TTL_MS. */
+  _learnSender(from, routedFrom) {
+    if (!from || !routedFrom || routedFrom === this.envName) return;
+    const at = from.lastIndexOf('@');
+    const agentName = at > 0 ? from.slice(0, at) : from;
+    const envName = at > 0 ? from.slice(at + 1) : routedFrom;
+    if (envName === this.envName || !this.envNames?.includes(envName)) return;
+    this._learned.set(`${agentName}@${envName}`, { envName, agentName, scopeText: agentName, expires: Date.now() + LEARNED_TTL_MS });
+  }
+
+  /** Merged directory plus unexpired learned entries the directory doesn't already carry. */
+  _resolveEntries() {
+    const now = Date.now();
+    const extra = [];
+    for (const [key, e] of this._learned) {
+      if (e.expires <= now) { this._learned.delete(key); continue; }
+      if (!this._mergedEntries.some((m) => m.envName === e.envName && m.agentName === e.agentName)) {
+        extra.push({ envName: e.envName, agentName: e.agentName, scopeText: e.scopeText });
+      }
+    }
+    return extra.length ? [...this._mergedEntries, ...extra] : this._mergedEntries;
   }
 
   /**
@@ -241,7 +283,7 @@ export class VortexRelayBridge {
   async _onDirectMessage(envelope) {
     // `Name@env/<session>`: route on `Name@env`, carry the selector as-is.
     const { address, session } = splitSessionSelector(envelope.to);
-    const resolved = resolveDirectoryName(address, this.envName, this._mergedEntries);
+    const resolved = resolveDirectoryName(address, this.envName, this._resolveEntries());
 
     if (resolved.status === 'not-found') {
       this._replyDirectError(envelope, `no agent named "${envelope.to}" is known across vortex-relay`);
@@ -361,12 +403,26 @@ export class VortexRelayBridge {
     // concurrent requests against the same relays over time.
     let publishBusy = false;
     let syncBusy = false;
-    const publishTick = () => {
+    let lastPublished = null;
+    // `agents` may be a (sync or async) function: the roster is re-read on
+    // every tick, so agents that register after startup — or a LAS backend
+    // that came up after vortexia — reach the directory instead of the
+    // startup snapshot being republished forever.
+    const currentRoster = async () => (typeof agents === 'function' ? agents() : agents);
+    const publishTick = async ({ onlyIfChanged = false } = {}) => {
       if (publishBusy) return;
       publishBusy = true;
-      this.publishSelf(agents)
-        .catch((err) => console.error(`[vortex-relay:${this.envName}] directory publish failed:`, err))
-        .finally(() => { publishBusy = false; });
+      try {
+        const roster = await currentRoster();
+        const signature = JSON.stringify(roster);
+        if (onlyIfChanged && signature === lastPublished) return;
+        await this.publishSelf(roster);
+        lastPublished = signature;
+      } catch (err) {
+        console.error(`[vortex-relay:${this.envName}] directory publish failed:`, err);
+      } finally {
+        publishBusy = false;
+      }
     };
     const syncTick = () => {
       if (syncBusy) return;
@@ -374,10 +430,12 @@ export class VortexRelayBridge {
       this.syncDirectory()
         .catch((err) => console.error(`[vortex-relay:${this.envName}] directory sync failed:`, err))
         .finally(() => { syncBusy = false; });
+      // Cheap local re-read; only a changed roster costs a relay write.
+      publishTick({ onlyIfChanged: true });
     };
     publishTick();
     syncTick();
-    this._publishTimer = setInterval(publishTick, publishIntervalMs);
+    this._publishTimer = setInterval(() => publishTick(), publishIntervalMs);
     this._directoryTimer = setInterval(syncTick, syncIntervalMs);
     return this;
   }
