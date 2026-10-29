@@ -245,7 +245,14 @@ export class NostrRelay {
     if (!this._ensurePromise) {
       this._ensurePromise = (async () => {
         const { SimplePool, getPublicKey } = await import('nostr-tools');
-        this._pool = new SimplePool();
+        // Node < 22 has no global WebSocket: nostr-tools then fails every
+        // relay with "WebSocket is not defined" and the merged directory
+        // goes empty (System@uy-mac on nvm node 20). Hand the pool `ws` —
+        // via its constructor: the package's main entry bundles its own
+        // pool, so useWebSocketImplementation() from 'nostr-tools/pool'
+        // never reaches this SimplePool.
+        const websocketImplementation = typeof globalThis.WebSocket === 'undefined' ? (await import('ws')).default : undefined;
+        this._pool = new SimplePool(websocketImplementation ? { websocketImplementation } : undefined);
         this._pubkey = getPublicKey(this.secretKey);
       })();
     }
