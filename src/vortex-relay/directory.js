@@ -80,6 +80,8 @@ export async function mergeDirectories(relay, envNames) {
     for (const agent of agents) {
       if (!agent?.agentName || !agent?.scopeText) continue;
       const entry = { envName, agentName: agent.agentName, scopeText: agent.scopeText };
+      // Optional (rosters from before it existed have none): the agent's widget color.
+      if (/^#[0-9a-fA-F]{6}$/.test(agent.color || '')) entry.color = agent.color;
       entries.push(entry);
       if (!byName.has(agent.agentName)) byName.set(agent.agentName, []);
       byName.get(agent.agentName).push(envName);

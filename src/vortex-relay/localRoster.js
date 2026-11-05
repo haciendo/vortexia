@@ -13,6 +13,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+
 export async function discoverLocalRoster(registryUrl = process.env.LAS_REGISTRY_URL || 'http://localhost:8700') {
   let agents;
   try {
@@ -27,15 +29,19 @@ export async function discoverLocalRoster(registryUrl = process.env.LAS_REGISTRY
   for (const [agentName, info] of Object.entries(agents ?? {})) {
     if (!info?.path) continue;
     let scopeText;
+    let color;
     try {
       const raw = fs.readFileSync(path.join(info.path, '.las-agent.json'), 'utf8');
       const parsed = JSON.parse(raw);
       scopeText = parsed.short_description || parsed.long_description;
+      // The agent's widget color (LAS writes it there): lets another
+      // environment paint this agent in its own tone.
+      if (HEX_COLOR.test(parsed.color || '')) color = parsed.color;
     } catch {
       // No .las-agent.json (or unreadable) — still list the agent so
       // exact-name delivery works, just without a scope match target.
     }
-    roster.push({ agentName, scopeText: scopeText || agentName });
+    roster.push({ agentName, scopeText: scopeText || agentName, ...(color ? { color } : {}) });
   }
   return roster;
 }

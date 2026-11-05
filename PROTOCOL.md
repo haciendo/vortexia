@@ -15,6 +15,7 @@ client (paho-mqtt, mqtt.js, mosquitto_pub, etc.) can speak it.
 | `las/agent/<name>/sessions/<sid>/inbox` | Direct message to one **session** of an agent — its own mailbox (see "Sessions") | 1 | no |
 | `las/agent/<name>/default-session` | Environment-published: which session holds the agent-level mailbox | 1 | **yes** |
 | `vortexia/control/mailbox/drop` (+ `/result`) | Drop a mailbox by client id (see "Dropping a mailbox") | 1 | no |
+| `vortex-relay/directory` | vortex-relay's merged, all-environments agent directory, for local consumers (see "The directory on the local broker") | 1 | **yes** |
 
 `<name>` is an agent name, matching the `name` field in that agent's
 `.agent.json` (see local-agent-society's `CLAUDE.md`).
@@ -220,6 +221,25 @@ good (LAS: on `DELETE /sessions/<sid>`):
 - `id` is echoed back so concurrent requests can be told apart. Reference
   implementation: `dropMailbox(clientId, { force })` in `src/client.js`;
   CLI `vortexia mailbox drop <clientId> [--force]`.
+
+## The directory on the local broker
+
+vortex-relay merges every environment's roster (each agent's name, scope
+and, optionally, `color`) and keeps it on this environment's broker,
+retained on `vortex-relay/directory`, republished only when it changes:
+
+```json
+{ "envName": "ba-mac", "updatedAt": 1787958159823,
+  "entries": [{ "envName": "uy-mac", "agentName": "coach", "scopeText": "…", "color": "#d7ca75" }] }
+```
+
+- `color` — the agent's widget color, `#rrggbb`, read from its
+  `.las-agent.json` `color` field (local-agent-society writes it). Absent
+  when the agent has none, or its environment runs a vortexia from before
+  this field: consumers must treat it as optional.
+- A consumer (the LAS backend's friends view) reads it with a throwaway
+  clean-session client; nothing is consumed. An absent topic means
+  vortex-relay is not running here.
 
 ## Connecting
 

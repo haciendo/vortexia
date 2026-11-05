@@ -17,6 +17,9 @@ import { publishDirectory, mergeDirectories, resolveDirectoryName, splitSessionS
 import { DirectMqttTransport } from './directTransport.js';
 import { ConnectionRouter, LocalConnection, DirectConnection, RelayConnection, qualifySender } from './connection.js';
 
+// Retained on the local broker: the merged directory, for local consumers (PROTOCOL.md).
+export const LOCAL_DIRECTORY_TOPIC = 'vortex-relay/directory';
+
 export const VORTEX_RELAY_KIND = 'vortex-relay-intent';
 
 // Point-to-point: "deliver to this exact name, wherever it lives" — as
@@ -373,7 +376,25 @@ export class VortexRelayBridge {
     // Static seed entries (if any) stay available too, e.g. for tests that
     // never call publishSelf/syncDirectory against a real relay directory.
     this._mergedEntries = [...this.directory, ...entries];
+    this._publishLocalDirectory();
     return { entries: this._mergedEntries, collisions };
+  }
+
+  /**
+   * Make the merged directory readable on THIS environment's broker:
+   * retained JSON on `vortex-relay/directory` (PROTOCOL.md), republished
+   * only when it changes. It is the one place a local consumer (the LAS
+   * backend) learns anything about agents on other machines — e.g. their
+   * widget color, so a friend there is painted in its own tone.
+   */
+  _publishLocalDirectory() {
+    const mqtt = this.localClient?.mqttClient;
+    if (!mqtt) return;
+    const entries = this._mergedEntries.map(({ envName, agentName, scopeText, color }) => ({ envName, agentName, scopeText, ...(color ? { color } : {}) }));
+    const signature = JSON.stringify(entries);
+    if (signature === this._lastLocalDirectory) return;
+    this._lastLocalDirectory = signature;
+    mqtt.publish(LOCAL_DIRECTORY_TOPIC, JSON.stringify({ envName: this.envName, updatedAt: Date.now(), entries }), { qos: 1, retain: true });
   }
 
   /**
