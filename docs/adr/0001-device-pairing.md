@@ -282,6 +282,12 @@ Mac), and vortexia doesn't need to know its shape.
    authenticates it.
 2. Consume `device-audio` messages from its mailbox: read `path`, transcribe,
    and deliver the result to `target` (agent or session) as a mic dictation.
+   The message text is exactly
+   `{"type":"device-audio","from","label","path","sha256","mime","durationMs","capturedAt","target":{"agent","session"?}}`.
+   `path` is an absolute path to an already-decrypted file. LAS owns the file
+   and deletes it when it is done. If `session` is missing, the dictation goes
+   to the agent's default session. An unknown `target.agent` gets an error
+   message back to `from`; it is never silently dropped.
 3. Mount the device-facing reads under `/device/`, starting with
    `GET /device/society/tree` (the full tree, with `ETag`). Trust
    `X-Vortexia-Device` only on loopback.
