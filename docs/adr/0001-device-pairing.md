@@ -191,7 +191,8 @@ store-and-forward log on volunteer relays is the wrong place for bulk data.
   sha256, key, mime, durationMs, capturedAt}`. That message can go over the
   relay, so the Mac knows the clip exists even before the bytes arrive.
 - vortexia writes the decrypted file to `data/device-inbox/<envName>/` and
-  delivers a normal message to LocalAgentSociety's mailbox:
+  delivers a notice to the system mailbox `las-device-audio` (a
+  deterministic consumer, not an agent session; see "What LAS has to do"):
   `{type: "device-audio", from: "jose-iphone", path, sha256, durationMs, capturedAt}`.
   LAS transcribes it from the local path.
 - **Away from home without Tailscale** the clip waits in the phone's queue, and
@@ -261,7 +262,7 @@ the home, as usual).
 
 **Dictation.** The blob message from §6 carries the target:
 `{type: "blob", sha256, key, mime, durationMs, capturedAt, target: {agent,
-session?}}`. The `device-audio` delivery to LocalAgentSociety includes
+session?}}`. The `device-audio` notice (system mailbox `las-device-audio`) includes
 `target`. LAS transcribes the clip and delivers it to that agent or session as
 a mic dictation (`origin: "human"`), so it renders the same as one from the
 widget mic. There is no target-less clip, because there is no general mic.
@@ -280,14 +281,24 @@ Mac), and vortexia doesn't need to know its shape.
    means anyone on the Wi-Fi can make agents speak, send messages, or close
    sessions. The phone never talks to `:8700`. It talks to vortexia, which
    authenticates it.
-2. Consume `device-audio` messages from its mailbox: read `path`, transcribe,
-   and deliver the result to `target` (agent or session) as a mic dictation.
-   The message text is exactly
+2. Consume `device-audio` notices with a **deterministic consumer** (the
+   widget app, which runs Whisper), never with an agent's LLM session. They go
+   to the system mailbox `las-device-audio` (topic
+   `las/agent/las-device-audio/inbox`; consumer client id
+   `las-agent-las-device-audio`, clean=false, QoS 1). It is a mailbox so that
+   it gets queueing before the first connect, the cap, the TTL and the restart
+   snapshot. It is not in the LAS registry, so it is not an agent. The
+   message text is exactly
    `{"type":"device-audio","from","label","path","sha256","mime","durationMs","capturedAt","target":{"agent","session"?}}`.
-   `path` is an absolute path to an already-decrypted file. LAS owns the file
-   and deletes it when it is done. If `session` is missing, the dictation goes
-   to the agent's default session. An unknown `target.agent` gets an error
-   message back to `from`; it is never silently dropped.
+   The consumer transcribes the clip and delivers it to `target` as a mic
+   dictation (`origin: "human"`). If `session` is missing, it goes to the
+   agent's default session. An unknown `target.agent` gets an error back to
+   `from`; it is never silently dropped.
+   **The file is the source of truth:** `path` (decrypted, under
+   `data/device-inbox/<env>/<sha256>.<ext>`) is deleted only after delivery.
+   On start, the consumer processes whatever is left in that folder,
+   deduplicated by sha256. That way a crash mid-transcription never loses a
+   clip, even if the MQTT ack was already sent.
 3. Mount the device-facing reads under `/device/`, starting with
    `GET /device/society/tree` (the full tree, with `ETag`). Trust
    `X-Vortexia-Device` only on loopback.
