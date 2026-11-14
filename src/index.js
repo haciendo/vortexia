@@ -142,13 +142,18 @@ async function startVortexRelay(mqttPort, wsPort) {
     // Trust comes from the friends store (data/friends.json), seeded by
     // VORTEXIA_NOSTR_PEERS ("envName:pubkeyHex,…") for pairings made by
     // hand before it existed — see friends.js and docs/adr/0001-device-pairing.md.
-    nostrRelay = new NostrRelay({ secretKey: Buffer.from(nostrSecretHex, 'hex'), friends: openFriendsStore() });
+    // VORTEXIA_NOSTR_ENCRYPT=1: write NIP-44 encrypted events (reads
+    // always accept both) — switch it on only once every peer runs a
+    // vortexia that reads them.
+    const encrypt = /^(1|true|yes)$/i.test(process.env.VORTEXIA_NOSTR_ENCRYPT || '');
+    nostrRelay = new NostrRelay({ secretKey: Buffer.from(nostrSecretHex, 'hex'), friends: openFriendsStore(), encrypt, envName });
     transports.push(nostrRelay);
   }
   if (gistId) transports.push(new GistRelay({ gistId, token: process.env.VORTEXIA_GIST_TOKEN }));
   const relay = transports.length > 1 ? new MultiRelay(transports) : transports[0];
   if (nostrRelay) {
     logger.info(`[vortexia] Nostr identity pubkey (share this for peers to trust ${envName}): ${await nostrRelay.publicKeyHex()}`);
+    logger.info(`[vortexia] Nostr writes are ${nostrRelay.encrypt ? 'NIP-44 encrypted' : 'PLAINTEXT (set VORTEXIA_NOSTR_ENCRYPT=1 once every peer reads encrypted)'}; reads accept both`);
   }
   // The gateway is the one consumer of `<env>-gateway`'s inbox: connect
   // as its mailbox session so an intent published in the moments before

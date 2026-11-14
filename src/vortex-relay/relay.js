@@ -171,6 +171,16 @@ const SNAPSHOT_KIND = 30078;
 // race or clobber each other.
 const LOG_KIND = 7878;
 
+// End-to-end encrypted counterparts (docs/adr/0001-device-pairing.md §4):
+// same shapes, content NIP-44 v2 encrypted to ONE recipient, so there is one
+// event per reader. The recipient is in a `p` tag, and the d tag is
+// `<filename>|<recipient pubkey>` — a parameterized-replaceable event is
+// unique per (kind, author, d), so per-reader snapshots must not share a d.
+const ENC_SNAPSHOT_KIND = 30079;
+const ENC_LOG_KIND = 7879;
+// NIP-44 v2 encrypts at most 65535 bytes of plaintext.
+const NIP44_MAX_PLAINTEXT = 65535;
+
 /**
  * Real relay backed by the Nostr network — a set of independent, free,
  * publicly-run relays (see DEFAULT_NOSTR_RELAYS) built specifically for
@@ -206,10 +216,14 @@ export class NostrRelay {
    *   simply can't read that peer's events — there's no way to
    *   discover an unknown peer's identity from the relay itself, by
    *   design (anyone could otherwise claim to be any environment).
-   * @param {{activePubkeys(): string[]}} [opts.friends] - a FriendsStore;
+   * @param {{activePubkeys(): string[], get(envName: string): any, active(): any[]}} [opts.friends] - a FriendsStore;
    *   its active friends are trusted as well (docs/adr/0001-device-pairing.md).
+   * @param {boolean} [opts.encrypt] - write NIP-44 encrypted events
+   *   (one per reader) instead of plaintext ones.
+   * @param {string} [opts.envName] - this environment's name, to map
+   *   `inbox-<env>.json` / `directory-<env>.json` to their readers.
    */
-  constructor({ secretKey, relays = DEFAULT_NOSTR_RELAYS, queryTimeoutMs = 5000, knownPeerPubkeys = {}, friends = null } = {}) {
+  constructor({ secretKey, relays = DEFAULT_NOSTR_RELAYS, queryTimeoutMs = 5000, knownPeerPubkeys = {}, friends = null, encrypt = false, envName = null } = {}) {
     if (!secretKey) throw new Error('NostrRelay requires a secretKey (see nostr-tools generateSecretKey())');
     this.secretKey = secretKey;
     this.relayUrls = relays;
@@ -218,6 +232,13 @@ export class NostrRelay {
     // Optional FriendsStore (friends.js): its active pubkeys are trusted
     // too, read on every query, so pairing and revoking need no restart.
     this.friends = friends;
+    // Reads always understand both plaintext and encrypted events; writes
+    // are encrypted only with `encrypt` (VORTEXIA_NOSTR_ENCRYPT=1), so every
+    // environment can be upgraded to read first and switched to write later
+    // — no flag day across machines.
+    this.encrypt = encrypt;
+    this.envName = envName;
+    this._conversationKeys = new Map();
     this._pool = null;
     this._pubkey = null;
     this._ensurePromise = null;
@@ -275,11 +296,17 @@ export class NostrRelay {
 
   async readFile(filename) {
     await this._ensure();
-    const events = await this._pool.querySync(
-      this.relayUrls,
-      { kinds: [SNAPSHOT_KIND, LOG_KIND], authors: this._trustedAuthors(), '#d': [filename] },
-      { maxWait: this.queryTimeoutMs },
-    );
+    const authors = this._trustedAuthors();
+    const [plain, encrypted] = await Promise.all([
+      this._pool.querySync(this.relayUrls, { kinds: [SNAPSHOT_KIND, LOG_KIND], authors, '#d': [filename] }, { maxWait: this.queryTimeoutMs }),
+      this._pool.querySync(this.relayUrls, { kinds: [ENC_SNAPSHOT_KIND, ENC_LOG_KIND], authors, '#d': [`${filename}|${this._pubkey}`] }, { maxWait: this.queryTimeoutMs }),
+    ]);
+    const decoded = [];
+    for (const e of plain) decoded.push({ event: e, snapshot: e.kind === SNAPSHOT_KIND, content: e.content });
+    for (const e of encrypted) {
+      const content = await this._decrypt(e);
+      if (content != null) decoded.push({ event: e, snapshot: e.kind === ENC_SNAPSHOT_KIND, content });
+    }
 
     // querySync fans out across every configured relay and merges whatever
     // each one has — public relays don't all converge to the latest
@@ -288,35 +315,107 @@ export class NostrRelay {
     // the FIRST one found (array order, not recency) risked silently
     // serving a relay's stale cached copy instead of the actual latest
     // write — found live: a directory snapshot kept reading back empty
-    // long after a real, non-empty publish had gone out.
-    const snapshots = events.filter((e) => e.kind === SNAPSHOT_KIND).sort((a, b) => b.created_at - a.created_at);
+    // long after a real, non-empty publish had gone out. Plaintext and
+    // encrypted snapshots compete on recency alike (mid-rollout a writer
+    // switches from one to the other).
+    const snapshots = decoded.filter((d) => d.snapshot).sort((a, b) => b.event.created_at - a.event.created_at);
     if (snapshots[0]) return JSON.parse(snapshots[0].content);
 
-    return events
-      .filter((e) => e.kind === LOG_KIND)
-      .sort((a, b) => a.created_at - b.created_at)
-      .map((e) => JSON.parse(e.content));
+    const seen = new Set();
+    return decoded
+      .filter((d) => !d.snapshot && !seen.has(d.event.id) && seen.add(d.event.id))
+      .sort((a, b) => a.event.created_at - b.event.created_at)
+      .map((d) => JSON.parse(d.content));
+  }
+
+  async _conversationKey(peerPubkey) {
+    let key = this._conversationKeys.get(peerPubkey);
+    if (!key) {
+      const nip44 = await import('nostr-tools/nip44');
+      key = nip44.getConversationKey(this.secretKey, peerPubkey);
+      this._conversationKeys.set(peerPubkey, key);
+    }
+    return key;
+  }
+
+  async _decrypt(event) {
+    try {
+      const nip44 = await import('nostr-tools/nip44');
+      return nip44.decrypt(event.content, await this._conversationKey(event.pubkey));
+    } catch (err) {
+      console.warn(`[vortex-relay] NostrRelay: could not decrypt event ${event.id?.slice(0, 12)} from ${event.pubkey?.slice(0, 12)} (${err.message}) — skipped`);
+      return null;
+    }
+  }
+
+  /**
+   * Who can read `filename`, as pubkeys: an inbox is read by its env alone;
+   * a directory by every active env friend plus this environment itself.
+   * Throws when no reader's key is known — encrypting to nobody, or falling
+   * back to plaintext, would both be silent failures.
+   */
+  _readersOf(filename) {
+    const inbox = /^inbox-(.+)\.json$/.exec(filename);
+    if (inbox) {
+      const env = inbox[1];
+      if (env === this.envName) return [this._pubkey];
+      const friend = this.friends?.get(env);
+      const reader = (friend && !friend.revokedAt ? friend.pubkey : null) || this.knownPeerPubkeys[env];
+      if (!reader) throw new Error(`NostrRelay: no known pubkey for env "${env}" — cannot encrypt ${filename} (pair it: vortexia friends add)`);
+      return [reader];
+    }
+    if (/^directory-.+\.json$/.test(filename)) {
+      const envFriends = this.friends ? this.friends.active().filter((f) => f.role === 'env').map((f) => f.pubkey) : [];
+      return [...new Set([this._pubkey, ...envFriends, ...Object.values(this.knownPeerPubkeys)])];
+    }
+    throw new Error(`NostrRelay: don't know who reads ${filename} — cannot encrypt it`);
+  }
+
+  async _encryptedEvents(kind, filename, payload) {
+    const { finalizeEvent } = await import('nostr-tools');
+    const nip44 = await import('nostr-tools/nip44');
+    const plaintext = JSON.stringify(payload);
+    if (Buffer.byteLength(plaintext) > NIP44_MAX_PLAINTEXT) {
+      throw new Error(`NostrRelay: ${filename} is ${Buffer.byteLength(plaintext)} bytes, over NIP-44's ${NIP44_MAX_PLAINTEXT}`);
+    }
+    const createdAt = Math.floor(Date.now() / 1000);
+    const events = [];
+    for (const reader of this._readersOf(filename)) {
+      events.push(finalizeEvent({
+        kind,
+        created_at: createdAt,
+        tags: [['d', `${filename}|${reader}`], ['p', reader]],
+        content: nip44.encrypt(plaintext, await this._conversationKey(reader)),
+      }, this.secretKey));
+    }
+    return events;
   }
 
   async appendMessage(filename, message) {
-    const { finalizeEvent } = await import('nostr-tools');
     await this._ensure();
-    const event = finalizeEvent(
-      { kind: LOG_KIND, created_at: Math.floor(Date.now() / 1000), tags: [['d', filename]], content: JSON.stringify(message) },
-      this.secretKey,
-    );
-    await this._publish(event);
+    if (this.encrypt) {
+      for (const event of await this._encryptedEvents(ENC_LOG_KIND, filename, message)) await this._publish(event);
+    } else {
+      const { finalizeEvent } = await import('nostr-tools');
+      await this._publish(finalizeEvent(
+        { kind: LOG_KIND, created_at: Math.floor(Date.now() / 1000), tags: [['d', filename]], content: JSON.stringify(message) },
+        this.secretKey,
+      ));
+    }
     return this.readFile(filename);
   }
 
   async writeFile(filename, data) {
-    const { finalizeEvent } = await import('nostr-tools');
     await this._ensure();
-    const event = finalizeEvent(
-      { kind: SNAPSHOT_KIND, created_at: Math.floor(Date.now() / 1000), tags: [['d', filename]], content: JSON.stringify(data) },
-      this.secretKey,
-    );
-    await this._publish(event);
+    if (this.encrypt) {
+      for (const event of await this._encryptedEvents(ENC_SNAPSHOT_KIND, filename, data)) await this._publish(event);
+    } else {
+      const { finalizeEvent } = await import('nostr-tools');
+      await this._publish(finalizeEvent(
+        { kind: SNAPSHOT_KIND, created_at: Math.floor(Date.now() / 1000), tags: [['d', filename]], content: JSON.stringify(data) },
+        this.secretKey,
+      ));
+    }
     return data;
   }
 
