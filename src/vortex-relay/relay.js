@@ -206,13 +206,18 @@ export class NostrRelay {
    *   simply can't read that peer's events — there's no way to
    *   discover an unknown peer's identity from the relay itself, by
    *   design (anyone could otherwise claim to be any environment).
+   * @param {{activePubkeys(): string[]}} [opts.friends] - a FriendsStore;
+   *   its active friends are trusted as well (docs/adr/0001-device-pairing.md).
    */
-  constructor({ secretKey, relays = DEFAULT_NOSTR_RELAYS, queryTimeoutMs = 5000, knownPeerPubkeys = {} } = {}) {
+  constructor({ secretKey, relays = DEFAULT_NOSTR_RELAYS, queryTimeoutMs = 5000, knownPeerPubkeys = {}, friends = null } = {}) {
     if (!secretKey) throw new Error('NostrRelay requires a secretKey (see nostr-tools generateSecretKey())');
     this.secretKey = secretKey;
     this.relayUrls = relays;
     this.queryTimeoutMs = queryTimeoutMs;
     this.knownPeerPubkeys = { ...knownPeerPubkeys };
+    // Optional FriendsStore (friends.js): its active pubkeys are trusted
+    // too, read on every query, so pairing and revoking need no restart.
+    this.friends = friends;
     this._pool = null;
     this._pubkey = null;
     this._ensurePromise = null;
@@ -230,7 +235,8 @@ export class NostrRelay {
   }
 
   _trustedAuthors() {
-    return [this._pubkey, ...Object.values(this.knownPeerPubkeys)];
+    const fromStore = this.friends ? this.friends.activePubkeys() : [];
+    return [...new Set([this._pubkey, ...Object.values(this.knownPeerPubkeys), ...fromStore])];
   }
 
   // Memoized in-flight promise, not a synchronous null-check: bridge.js

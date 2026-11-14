@@ -16,6 +16,7 @@ client (paho-mqtt, mqtt.js, mosquitto_pub, etc.) can speak it.
 | `las/agent/<name>/default-session` | Environment-published: which session holds the agent-level mailbox | 1 | **yes** |
 | `vortexia/control/mailbox/drop` (+ `/result`) | Drop a mailbox by client id (see "Dropping a mailbox") | 1 | no |
 | `vortex-relay/directory` | vortex-relay's merged, all-environments agent directory, for local consumers (see "The directory on the local broker") | 1 | **yes** |
+| `vortex-relay/friends` | this environment's paired friends (envs and devices), key-free (see "Friends on the local broker") | 1 | **yes** |
 
 `<name>` is an agent name, matching the `name` field in that agent's
 `.agent.json` (see local-agent-society's `CLAUDE.md`).
@@ -240,6 +241,26 @@ retained on `vortex-relay/directory`, republished only when it changes:
 - A consumer (the LAS backend's friends view) reads it with a throwaway
   clean-session client; nothing is consumed. An absent topic means
   vortex-relay is not running here.
+
+## Friends on the local broker
+
+Who this environment trusts lives in `data/friends.json` (see
+docs/adr/0001-device-pairing.md §2; `VORTEXIA_NOSTR_PEERS` is still read as a
+seed of `env` friends). Manage it with `vortexia friends
+[list|add <envName> <pubkeyHex> [--device] [--label "…"]|revoke <envName>|rename <envName> <label>]`;
+changes apply without a restart. A key-free view is retained on
+`vortex-relay/friends`, republished when it changes (checked every 5 s):
+
+```json
+{ "updatedAt": 1794700000000,
+  "friends": [{ "envName": "jose-iphone", "role": "device", "label": "iPhone de José",
+                "addedAt": 1794700000000, "revokedAt": null }] }
+```
+
+- `role` — `env` (runs its own broker) or `device` (a phone: keypair, no broker).
+- `revokedAt` — set once revoked; a revoked friend's events are ignored. It
+  stays listed so a UI can show it, and so a seed can never re-trust it.
+- Published only while vortex-relay is enabled here.
 
 ## Connecting
 

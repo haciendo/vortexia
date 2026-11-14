@@ -12,6 +12,32 @@ import { VortexRelayBridge } from './vortex-relay/bridge.js';
 import { GistRelay, NostrRelay, MultiRelay } from './vortex-relay/relay.js';
 import { discoverLocalRoster } from './vortex-relay/localRoster.js';
 import { LanDiscovery } from './vortex-relay/lanDiscovery.js';
+import { FriendsStore, parsePeersEnv, FRIENDS_TOPIC } from './vortex-relay/friends.js';
+
+function openFriendsStore() {
+  return new FriendsStore({ file: path.join(defaultDataDir(), 'friends.json'), seed: parsePeersEnv(process.env.VORTEXIA_NOSTR_PEERS || '') });
+}
+
+// Retained, key-free view of the friends store on the local broker (ADR
+// 0001 §2), for the LAS backend's "paired devices" list. Re-checked on a
+// short timer because `vortexia friends …` writes the file from another
+// process; published only when it changes.
+function startFriendsPublisher(client, store, intervalMs = 5000) {
+  let last = null;
+  const tick = () => {
+    const mqtt = client.mqttClient;
+    if (!mqtt?.connected) return;
+    const friends = store.toPublic();
+    const signature = JSON.stringify(friends);
+    if (signature === last) return;
+    last = signature;
+    mqtt.publish(FRIENDS_TOPIC, JSON.stringify({ updatedAt: Date.now(), friends }), { qos: 1, retain: true });
+  };
+  tick();
+  const timer = setInterval(tick, intervalMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -113,17 +139,10 @@ async function startVortexRelay(mqttPort, wsPort) {
   const transports = [];
   let nostrRelay = null;
   if (nostrSecretHex) {
-    // VORTEXIA_NOSTR_PEERS: "envName:pubkeyHex,envName2:pubkeyHex2" —
-    // each peer environment's OWN pubkey (public by design, safe to share
-    // in the open), exchanged out of band (e.g. `las agent inject`) since
-    // there's no way to discover an unknown environment's identity from
-    // the relay itself without this — see NostrRelay's doc comment.
-    const knownPeerPubkeys = Object.fromEntries(
-      (process.env.VORTEXIA_NOSTR_PEERS || '')
-        .split(',').map((s) => s.trim()).filter(Boolean)
-        .map((pair) => pair.split(':').map((s) => s.trim())),
-    );
-    nostrRelay = new NostrRelay({ secretKey: Buffer.from(nostrSecretHex, 'hex'), knownPeerPubkeys });
+    // Trust comes from the friends store (data/friends.json), seeded by
+    // VORTEXIA_NOSTR_PEERS ("envName:pubkeyHex,…") for pairings made by
+    // hand before it existed — see friends.js and docs/adr/0001-device-pairing.md.
+    nostrRelay = new NostrRelay({ secretKey: Buffer.from(nostrSecretHex, 'hex'), friends: openFriendsStore() });
     transports.push(nostrRelay);
   }
   if (gistId) transports.push(new GistRelay({ gistId, token: process.env.VORTEXIA_GIST_TOKEN }));
@@ -189,6 +208,7 @@ async function startVortexRelay(mqttPort, wsPort) {
   bridge.startDirectorySync(rosterSource, { publishIntervalMs: 300000, syncIntervalMs: 15000 });
   bridge.startPolling(1000);
   const lan = await startLanDiscovery(bridge, { envName, mqttPort, wsPort });
+  startFriendsPublisher(gateway, openFriendsStore());
 
   logger.info(`[vortexia] vortex-relay enabled: env=${envName}, envNames=[${envNames.join(', ')}], local roster=${roster.length} agent(s)`);
   return { bridge, gateway, stopGateway, lan };
@@ -328,6 +348,57 @@ async function cmdMailboxDrop(args) {
   }
 }
 
+function cmdFriends(args) {
+  const store = openFriendsStore();
+  const [sub, ...rest] = args;
+  const flag = (name) => {
+    const i = rest.indexOf(name);
+    if (i < 0) return undefined;
+    const [, value] = rest.splice(i, 2);
+    return value;
+  };
+  try {
+    switch (sub) {
+      case undefined:
+      case 'list': {
+        const all = store.list();
+        if (!all.length) { console.log('No friends yet. Pair one with: vortexia friends add <envName> <pubkeyHex> [--device] [--label "…"]'); return; }
+        for (const f of all) {
+          const state = f.revokedAt ? `revoked ${new Date(f.revokedAt).toISOString()}` : 'active';
+          console.log(`${f.envName.padEnd(20)} ${f.role.padEnd(6)} ${state.padEnd(32)} ${f.pubkey.slice(0, 16)}…  ${f.label}${f.source === 'env' ? '  (from VORTEXIA_NOSTR_PEERS)' : ''}`);
+        }
+        return;
+      }
+      case 'add': {
+        const isDevice = rest.includes('--device');
+        if (isDevice) rest.splice(rest.indexOf('--device'), 1);
+        const label = flag('--label');
+        const [envName, pubkey] = rest;
+        const f = store.add({ envName, pubkey, role: isDevice ? 'device' : 'env', label });
+        console.log(`Paired ${f.envName} (${f.role}).`);
+        return;
+      }
+      case 'revoke': {
+        const f = store.revoke(rest[0]);
+        if (!f) throw new Error(`no friend named "${rest[0]}"`);
+        console.log(`Revoked ${f.envName}.`);
+        return;
+      }
+      case 'rename': {
+        const f = store.rename(rest[0], rest.slice(1).join(' '));
+        if (!f) throw new Error(`no friend named "${rest[0]}"`);
+        console.log(`${f.envName} is now "${f.label}".`);
+        return;
+      }
+      default:
+        throw new Error('usage: vortexia friends [list|add <envName> <pubkeyHex> [--device] [--label "…"]|revoke <envName>|rename <envName> <label>]');
+    }
+  } catch (err) {
+    console.error(`vortexia: ${err.message}`);
+    process.exit(1);
+  }
+}
+
 const cmd = process.argv[2];
 
 switch (cmd) {
@@ -356,7 +427,10 @@ switch (cmd) {
       process.exit(1);
     }
     break;
+  case 'friends':
+    cmdFriends(process.argv.slice(3));
+    break;
   default:
-    console.log('Usage: vortexia <start|stop|status|scope scan <dir>|mailbox drop <clientId> [--force]>');
+    console.log('Usage: vortexia <start|stop|status|scope scan <dir>|mailbox drop <clientId> [--force]|friends …>');
     process.exit(cmd ? 1 : 0);
 }
