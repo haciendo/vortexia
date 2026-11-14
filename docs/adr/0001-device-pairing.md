@@ -313,8 +313,9 @@ go over Nostr when there is no direct path.
   re-upload harmless.
 - **Dev mode:** `VORTEXIA_DEVICE_DEV=1` on the home accepts requests without
   the auth header, and answers `/device/*` GETs in plaintext. It is for a dev
-  build only: the home logs a warning on every request, and the setting is
-  refused unless the broker also binds to a private address.
+  build only: the home logs a warning on every request, and it only accepts
+  requests from loopback or private-range source addresses (RFC 1918,
+  Tailscale's 100.64/10).
 
 ## What LAS has to do
 
