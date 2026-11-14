@@ -342,6 +342,19 @@ go over Nostr when there is no direct path.
    On start, the consumer processes whatever is left in that folder,
    deduplicated by sha256. That way a crash mid-transcription never loses a
    clip, even if the MQTT ack was already sent.
+   **Sidecar:** next to every clip the gateway writes `<sha256>.json`, holding
+   the exact notice JSON (so the target survives without the message). Write
+   order: the clip, then the sidecar (both tmp+rename), then the notice. The
+   startup scan looks for `deviceInboxDir/<env>/*.json`; a clip without a
+   sidecar is logged and ignored. After delivery, LAS deletes both files.
+   A **rejected** clip (unknown agent, no speech, sha mismatch) is never
+   deleted, since a dictation may be irreplaceable: LAS moves both files to
+   `<env>/rejected/` with a `<sha256>.reason.txt`.
+   **Result to the device:** LAS always answers `from` with
+   `{"type":"device-audio-result","sha256","ok":true,"chars"}` or
+   `{…,"ok":false,"error","target"}`. The phone keeps the clip in its queue
+   until it gets a result, and on either answer it marks it done; a rejected
+   clip is safe on the home.
 3. Mount the device-facing reads under `/device/`, starting with
    `GET /device/society/tree` (the full tree, with `ETag`). Trust
    `X-Vortexia-Device` only on loopback.
