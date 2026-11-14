@@ -274,6 +274,48 @@ through the mailboxes:** the roster is LAS's data model. A proxy keeps it in
 one place (`/society/tree`, which LAS also wants for a future full view on the
 Mac), and vortexia doesn't need to know its shape.
 
+### 9. The device gateway's HTTP interface (direct paths)
+
+On a direct path (LAN or Tailscale) the app speaks **plain HTTP** to the
+home's vortexia WS port, which serves these routes beside MQTT-over-WS.
+That is simpler in React Native than an MQTT client, and the same events can
+go over Nostr when there is no direct path.
+
+- **Base URL:** `http://<host>:<port>`, taken from the QR's `lan=` / `ts=`
+  endpoints. No TLS: every request is signed, and every body that carries
+  content is encrypted (see below).
+- **Auth header, on every request:** `Authorization: Nostr <base64(JSON of a
+  signed event)>`, NIP-98 style. The event has `kind 27235`, `created_at`
+  within ±60 s of the home's clock, and these tags:
+  `["u", "<absolute URL, query included>"]`, `["method", "GET"|"PUT"|"POST"]`,
+  and, when there is a body, `["payload", "<hex sha256 of the exact body bytes>"]`.
+  It is signed with the device key, whose pubkey must be an active friend. A
+  missing or invalid header gets `401`, and a revoked friend gets `403`.
+- **`POST /device/events`** — the body is one signed **7879 event** (§4) as JSON.
+  It is the direct-path equivalent of publishing to Nostr: `send`, `blob`,
+  `http`, `PAIR_REQUEST` (this last one goes without the auth header, since
+  the token is the proof). Answers: `202`, or `200` with
+  `{"events": [ <7879 events for the device> ]}`, which carries replies
+  such as `http-response` and `PAIR_ACK`.
+- **`GET /device/<path>`** — proxied to LAS at `127.0.0.1:8700/device/<path>`
+  (§8). `If-None-Match` is passed through, and `ETag` / `304` come back. The
+  response body is **NIP-44 encrypted to the device**
+  (`Content-Type: application/vnd.vortexia.nip44`; the plaintext is LAS's
+  body). The original type is in `X-Vortexia-Content-Type`.
+- **`PUT /device/blob/<sha256>`** — `<sha256>` is the hex sha256 of the
+  **plaintext** clip: it is the clip's id and is used to deduplicate.
+  `Content-Type: application/octet-stream`. The body is
+  `nonce(12) ‖ AES-256-GCM ciphertext ‖ tag(16)`, with a random 32-byte key
+  per clip, and the `payload` tag is the sha256 of these body bytes. The key
+  travels only inside the `blob` 7879 event (NIP-44), which can arrive
+  before or after the PUT. The home only decrypts and delivers once it has
+  both. Answers: `201`, or `200` if it already had that clip, which makes a
+  re-upload harmless.
+- **Dev mode:** `VORTEXIA_DEVICE_DEV=1` on the home accepts requests without
+  the auth header, and answers `/device/*` GETs in plaintext. It is for a dev
+  build only: the home logs a warning on every request, and the setting is
+  refused unless the broker also binds to a private address.
+
 ## What LAS has to do
 
 **Backend (`:8700`)**
