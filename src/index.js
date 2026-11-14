@@ -13,6 +13,7 @@ import { GistRelay, NostrRelay, MultiRelay } from './vortex-relay/relay.js';
 import { discoverLocalRoster } from './vortex-relay/localRoster.js';
 import { LanDiscovery } from './vortex-relay/lanDiscovery.js';
 import { FriendsStore, parsePeersEnv, FRIENDS_TOPIC } from './vortex-relay/friends.js';
+import { startFriendsControl } from './vortex-relay/control.js';
 
 function openFriendsStore() {
   return new FriendsStore({ file: path.join(defaultDataDir(), 'friends.json'), seed: parsePeersEnv(process.env.VORTEXIA_NOSTR_PEERS || '') });
@@ -36,7 +37,7 @@ function startFriendsPublisher(client, store, intervalMs = 5000) {
   tick();
   const timer = setInterval(tick, intervalMs);
   timer.unref?.();
-  return () => clearInterval(timer);
+  return { stop: () => clearInterval(timer), refresh: tick };
 }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -213,7 +214,9 @@ async function startVortexRelay(mqttPort, wsPort) {
   bridge.startDirectorySync(rosterSource, { publishIntervalMs: 300000, syncIntervalMs: 15000 });
   bridge.startPolling(1000);
   const lan = await startLanDiscovery(bridge, { envName, mqttPort, wsPort });
-  startFriendsPublisher(gateway, openFriendsStore());
+  const friendsStore = openFriendsStore();
+  const friendsPublisher = startFriendsPublisher(gateway, friendsStore);
+  startFriendsControl({ mqttPort, store: friendsStore, onChange: friendsPublisher.refresh, logger });
 
   logger.info(`[vortexia] vortex-relay enabled: env=${envName}, envNames=[${envNames.join(', ')}], local roster=${roster.length} agent(s)`);
   return { bridge, gateway, stopGateway, lan };
