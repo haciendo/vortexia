@@ -368,3 +368,21 @@ test('presence LWT fires offline on an abrupt disconnect', async () => {
     await broker.close();
   }
 });
+
+test('the broker publishes its absolute file paths retained on vortexia/paths', async () => {
+  const { PATHS_TOPIC } = await import('../src/topics.js');
+  const broker = await startBroker();
+  const client = mqtt.connect(`mqtt://127.0.0.1:${broker.mqttPort}`);
+  try {
+    const payload = await new Promise((resolve, reject) => {
+      client.on('error', reject);
+      client.on('message', (topic, msg) => { if (topic === PATHS_TOPIC) resolve(JSON.parse(msg.toString())); });
+      client.on('connect', () => client.subscribe(PATHS_TOPIC, { qos: 0 }));
+    });
+    assert.ok(payload.dataDir.startsWith('/'));
+    assert.equal(payload.deviceInboxDir, `${payload.dataDir}/device-inbox`);
+  } finally {
+    client.end(true);
+    await broker.close();
+  }
+});

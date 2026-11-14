@@ -16,6 +16,7 @@ client (paho-mqtt, mqtt.js, mosquitto_pub, etc.) can speak it.
 | `las/agent/<name>/default-session` | Environment-published: which session holds the agent-level mailbox | 1 | **yes** |
 | `vortexia/control/mailbox/drop` (+ `/result`) | Drop a mailbox by client id (see "Dropping a mailbox") | 1 | no |
 | `vortex-relay/directory` | vortex-relay's merged, all-environments agent directory, for local consumers (see "The directory on the local broker") | 1 | **yes** |
+| `vortexia/paths` | where this broker keeps its files: `{dataDir, deviceInboxDir}`, absolute (`VORTEXIA_DATA_DIR` wins over `<repo>/data`) | 0 | **yes** |
 | `vortex-relay/friends` | this environment's paired friends (envs and devices), key-free (see "Friends on the local broker") | 1 | **yes** |
 
 `<name>` is an agent name, matching the `name` field in that agent's

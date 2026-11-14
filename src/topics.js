@@ -92,6 +92,10 @@ export function mailboxOwnerOf(topic) {
 // Control: drop a mailbox (persistent session + queue) by client id — see
 // PROTOCOL.md "Dropping a mailbox". Request JSON { clientId, id?, force? },
 // the broker answers on the result topic with { id, clientId, dropped, reason? }.
+/** Retained at broker start: where this broker keeps its files ({dataDir, deviceInboxDir}). */
+export const PATHS_TOPIC = 'vortexia/paths';
+export const DEVICE_AUDIO_MAILBOX = 'las-device-audio';
+
 export const MAILBOX_DROP_TOPIC = 'vortexia/control/mailbox/drop';
 export const MAILBOX_DROP_RESULT_TOPIC = 'vortexia/control/mailbox/drop/result';
 

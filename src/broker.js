@@ -5,7 +5,7 @@ import Aedes from 'aedes';
 import { createServer } from 'aedes-server-factory';
 import { logger } from './logger.js';
 import { MailboxPersistence, DEFAULT_MAILBOX_CAP, DEFAULT_MAILBOX_TTL_MS } from './mailbox.js';
-import { mailboxClientId, mailboxOwnerOf, parseInboxTopic, sessionTopic, MAILBOX_DROP_TOPIC, MAILBOX_DROP_RESULT_TOPIC } from './topics.js';
+import { mailboxClientId, mailboxOwnerOf, parseInboxTopic, sessionTopic, MAILBOX_DROP_TOPIC, MAILBOX_DROP_RESULT_TOPIC, PATHS_TOPIC } from './topics.js';
 import {
   bindWithPolicy,
   readStickyPorts,
@@ -176,6 +176,16 @@ export async function startBroker({
   // Restored mailboxes start out with nobody connected — say so on their
   // retained session topics (retained state isn't snapshotted; see mailbox.js).
   for (const id of persistence.sessions) publishSession({ id }, false);
+
+  // Where this broker keeps its files, for local consumers that scan them —
+  // the widget's device-audio consumer rescans deviceInboxDir on start
+  // (docs/adr/0001-device-pairing.md). Absolute paths; VORTEXIA_DATA_DIR wins.
+  aedes.publish({
+    topic: PATHS_TOPIC,
+    payload: Buffer.from(JSON.stringify({ dataDir: path.resolve(dataDir), deviceInboxDir: path.resolve(dataDir, 'device-inbox') })),
+    qos: 0,
+    retain: true,
+  }, () => {});
 
   const tcpServer = createServer(aedes, { ws: false });
   const wsServer = createServer(aedes, { ws: true });
