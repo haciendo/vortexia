@@ -317,6 +317,47 @@ go over Nostr when there is no direct path.
   requests from loopback or private-range source addresses (RFC 1918,
   Tailscale's 100.64/10).
 
+### 10. Pairing and friends control over MQTT (for the LAS UI)
+
+The LAS UI drives pairing over the **local** broker. It never runs the CLI.
+All of this follows the same request/response pattern as
+`vortexia/control/mailbox/drop`: the request carries a caller-chosen `id`,
+and the answer goes on `<topic>/result` with the same `id`, QoS 1, not
+retained. Only **loopback** clients may publish to `vortexia/control/*`;
+the broker enforces this once §5's auth hook lands.
+
+| Request topic | Payload | Answer on `…/result` |
+|---|---|---|
+| `vortexia/control/pair/start` | `{id, role: "device"\|"env", label?, ttlMs?}` (ttl default 600000, max 900000) | `{id, ok, sessionId, uri: "vxpair:1?…", expiresAt}` or `{id, ok: false, error}` |
+| `vortexia/control/pair/cancel` | `{id, sessionId}` | `{id, ok}`. The token is burned. |
+| `vortexia/control/pair/decide` | `{id, sessionId, accept: true\|false}` | `{id, ok, envName?}` or `{id, ok: false, error}` (`"expired"`, `"unknown session"`) |
+| `vortexia/control/friends/revoke` | `{id, envName}` | `{id, ok, envName}` or `{id, ok: false, error: "unknown friend"}` |
+| `vortexia/control/friends/rename` | `{id, envName, label}` | `{id, ok, envName, label}` |
+
+**Pending requests, retained** on `vortexia/pair/pending`. A UI that opens
+late still sees them, and the topic is republished on every change (empty
+list = nothing pending):
+
+```json
+{ "updatedAt": 1794700000000,
+  "pending": [{ "sessionId": "…", "role": "device", "envName": "jose-iphone",
+                "label": "iPhone de José", "fingerprint": "3F9A·C21E·77B0·4D18",
+                "requestedAt": 1794700000000, "expiresAt": 1794700600000 }] }
+```
+
+- `fingerprint` is the first 8 bytes of the requester's pubkey, in hex,
+  grouped in 4s. The app shows the same string for its own key, so the human
+  can compare the two before accepting.
+- A pairing session goes through `waiting` (QR shown) → `pending` (a valid
+  `PAIR_REQUEST` arrived) → `paired` | `rejected` | `expired` | `cancelled`.
+  It only appears in `pending` while it is in that state. A pending request
+  not decided before `expiresAt` expires, and the device gets a rejection.
+- **Outcome events** (not retained) on `vortexia/pair/events`:
+  `{type: "paired"|"rejected"|"expired"|"cancelled", sessionId, envName?}`.
+  The UI can close the QR on these. The friends list itself is still
+  `vortex-relay/friends` (retained), which updates on its own.
+- `vortexia friends add/revoke/rename` remain as the CLI over the same store.
+
 ## What LAS has to do
 
 **Backend (`:8700`)**
