@@ -14,6 +14,25 @@ import { discoverLocalRoster } from './vortex-relay/localRoster.js';
 import { LanDiscovery } from './vortex-relay/lanDiscovery.js';
 import { FriendsStore, parsePeersEnv, FRIENDS_TOPIC } from './vortex-relay/friends.js';
 import { startFriendsControl } from './vortex-relay/control.js';
+import { PairingManager } from './vortex-relay/pairing.js';
+import { DeviceGateway } from './vortex-relay/deviceGateway.js';
+import os from 'node:os';
+
+// Where a paired device can reach this env directly: private IPv4s (LAN) and
+// Tailscale's 100.64/10, with the WS port that serves the device gateway.
+function deviceEndpoints(wsPort) {
+  const lan = [];
+  const ts = [];
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const a of addrs || []) {
+      if (a.family !== 'IPv4' || a.internal) continue;
+      const m = /^100\.(\d+)\./.exec(a.address);
+      if (m && Number(m[1]) >= 64 && Number(m[1]) <= 127) ts.push(`${a.address}:${wsPort}`);
+      else if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(a.address)) lan.push(`${a.address}:${wsPort}`);
+    }
+  }
+  return { lan, ts };
+}
 import { BrokerAuthenticator, buildBrokerCredentials } from './auth.js';
 
 function openFriendsStore() {
@@ -116,7 +135,7 @@ async function startLanDiscovery(bridge, { envName, mqttPort, wsPort }) {
   return lan;
 }
 
-async function startVortexRelay(mqttPort, wsPort) {
+async function startVortexRelay(mqttPort, wsPort, wsServer = null) {
   const envName = process.env.VORTEXIA_ENV_NAME;
   const gistId = process.env.VORTEXIA_GIST_ID;
   const nostrSecretHex = process.env.VORTEXIA_NOSTR_SECRET_KEY;
@@ -220,7 +239,24 @@ async function startVortexRelay(mqttPort, wsPort) {
   const lan = await startLanDiscovery(bridge, { envName, mqttPort, wsPort });
   const friendsStore = openFriendsStore();
   const friendsPublisher = startFriendsPublisher(gateway, friendsStore);
-  startFriendsControl({ mqttPort, store: friendsStore, onChange: friendsPublisher.refresh, logger });
+  // Pairing and the device gateway need this env's Nostr key (ADR 0001 §3, §9).
+  let pairing = null;
+  let deviceGateway = null;
+  if (nostrSecretHex) {
+    const secretKey = Buffer.from(nostrSecretHex, 'hex');
+    pairing = new PairingManager({
+      envName, secretKey, friends: friendsStore,
+      endpoints: () => deviceEndpoints(wsPort),
+      relays: nostrRelay ? nostrRelay.relayUrls : [],
+    });
+    if (wsServer) {
+      deviceGateway = new DeviceGateway({ envName, secretKey, friends: friendsStore, pairing, mqttPort, dataDir: defaultDataDir(), logger });
+      await deviceGateway.start();
+      deviceGateway.attach(wsServer);
+      logger.info(`[vortexia] device gateway on the WS port (${wsPort}): http://<lan>:${wsPort}/device/…${deviceGateway.dev ? ' — DEV MODE' : ''}`);
+    }
+  }
+  startFriendsControl({ mqttPort, store: friendsStore, pairing, onChange: friendsPublisher.refresh, logger });
 
   logger.info(`[vortexia] vortex-relay enabled: env=${envName}, envNames=[${envNames.join(', ')}], local roster=${roster.length} agent(s)`);
   return { bridge, gateway, stopGateway, lan };
@@ -237,7 +273,7 @@ async function cmdStart() {
   // = warn (default: log, let in) | enforce | off.
   const authenticator = new BrokerAuthenticator({ envName: process.env.VORTEXIA_ENV_NAME || null, friends: openFriendsStore(), logger });
   logger.info(`[vortexia] broker auth for non-loopback clients: ${authenticator.mode}`);
-  const { mqttPort, wsPort, close } = await startBroker({ authenticator });
+  const { mqttPort, wsPort, wsServer, close } = await startBroker({ authenticator });
 
   fs.writeFileSync(PID_FILE, String(process.pid));
   fs.writeFileSync(PORT_FILE, JSON.stringify({ mqttPort, wsPort, pid: process.pid }, null, 2));
@@ -248,7 +284,7 @@ async function cmdStart() {
   logger.info(`  data dir:       ${defaultDataDir()}`);
   startLoopWatchdog();
 
-  const vortexRelay = await startVortexRelay(mqttPort, wsPort).catch((err) => {
+  const vortexRelay = await startVortexRelay(mqttPort, wsPort, wsServer).catch((err) => {
     logger.error(`[vortexia] vortex-relay failed to start: ${err.message}`);
     return null;
   });

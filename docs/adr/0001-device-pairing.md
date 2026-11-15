@@ -295,6 +295,9 @@ go over Nostr when there is no direct path.
   within ±60 s of the home's clock, and these tags:
   `["u", "<absolute URL, query included>"]`, `["method", "GET"|"PUT"|"POST"]`,
   and, when there is a body, `["payload", "<hex sha256 of the exact body bytes>"]`.
+  Add `["nonce", "<random hex>"]` as well. Each auth event is accepted only
+  once, so without a nonce two identical requests in the same second would be
+  the same event, and the second would get a `401 replayed`.
   It is signed with the device key, whose pubkey must be an active friend. A
   missing or invalid header gets `401`, and a revoked friend gets `403`.
 - **`POST /device/events`** — the body is one signed **7879 event** (§4) as JSON.
@@ -303,6 +306,19 @@ go over Nostr when there is no direct path.
   the token is the proof). Answers: `202`, or `200` with
   `{"events": [ <7879 events for the device> ]}`, which carries replies
   such as `http-response` and `PAIR_ACK`.
+- **`GET /device/pair/<sessionId>`** (no auth: the reply is encrypted to
+  the requester) — pairing status after a `PAIR_REQUEST`. It answers `202`
+  `{state: "pending"}` while the human decides, `200 {state: "paired",
+  event: <PAIR_ACK 7879>}` once accepted, and `410` when the session ends up
+  `rejected`, `expired` or `cancelled` (with `event: <PAIR_REJECT>` if it
+  was rejected). `POST /device/events` with a `PAIR_REQUEST` answers
+  `202 {sessionId}`, or `409` for a used or unknown token.
+- **`GET /device/events?ack=<cursor>`** — the device's **outbox**: everything
+  agents sent to `<deviceEnvName>` (e.g. `device-audio-result`), as 7879
+  events `{type: "message", seq, id, from, text, ts, kind, source}`. The
+  answer is `{cursor, events}`. Pass the last `cursor` as `ack` on the next
+  call to drop what was already received. The home keeps the device's
+  mailbox, so messages wait while the phone is away (cap 500).
 - **`GET /device/<path>`** — proxied to LAS at `127.0.0.1:8700/device/<path>`
   (§8). `If-None-Match` is passed through, and `ETag` / `304` come back. The
   response body is **NIP-44 encrypted to the device**

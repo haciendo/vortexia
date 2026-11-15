@@ -40,7 +40,7 @@ export async function buildBrokerCredentials(secretKey, targetEnvName, now = Dat
   const event = finalizeEvent({
     kind: AUTH_KIND,
     created_at: Math.floor(now() / 1000),
-    tags: [['challenge', targetEnvName]],
+    tags: [['challenge', targetEnvName], ['nonce', Math.random().toString(16).slice(2) + Date.now().toString(16)]],
     content: '',
   }, secretKey);
   return { username: getPublicKey(secretKey), password: JSON.stringify(event) };
