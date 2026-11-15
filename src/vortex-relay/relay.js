@@ -153,7 +153,21 @@ export class GistRelay {
 // Default public relays for NostrRelay — well-established, free, no
 // account/API key needed. Override via the `relays` option for a private
 // or self-hosted set.
-const DEFAULT_NOSTR_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band'];
+// More than one operator on purpose: a publish needs ONE relay to accept it
+// and peers read the union, so environments only need to share a single live
+// relay. Found 2026-11-15: damus (521), nos.lol and nostr.band (handshake
+// timeouts) were all down at once, which silently cut ba-mac off from
+// uy-mac — hence primal and snort as well. VORTEXIA_NOSTR_RELAYS overrides
+// the whole list (comma-separated wss:// URLs).
+export const DEFAULT_NOSTR_RELAYS = [
+  'wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.nostr.band',
+  'wss://relay.primal.net', 'wss://relay.snort.social',
+];
+
+export function nostrRelaysFromEnv(value = process.env.VORTEXIA_NOSTR_RELAYS) {
+  const list = String(value || '').split(',').map((s) => s.trim()).filter((u) => /^wss?:\/\//.test(u));
+  return list.length ? list : DEFAULT_NOSTR_RELAYS;
+}
 
 // NIP-78 "application-specific data": a parameterized-replaceable event
 // (last publish with the same `d` tag WINS, older ones are dropped by the

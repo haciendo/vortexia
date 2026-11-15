@@ -9,7 +9,7 @@ import { logger } from './logger.js';
 import { startLoopWatchdog } from './watchdog.js';
 import { VortexiaClient, dropMailbox } from './client.js';
 import { VortexRelayBridge } from './vortex-relay/bridge.js';
-import { GistRelay, NostrRelay, MultiRelay } from './vortex-relay/relay.js';
+import { GistRelay, NostrRelay, MultiRelay, nostrRelaysFromEnv } from './vortex-relay/relay.js';
 import { discoverLocalRoster } from './vortex-relay/localRoster.js';
 import { LanDiscovery } from './vortex-relay/lanDiscovery.js';
 import { FriendsStore, parsePeersEnv, FRIENDS_TOPIC } from './vortex-relay/friends.js';
@@ -148,13 +148,14 @@ async function startVortexRelay(mqttPort, wsPort) {
     // always accept both) — switch it on only once every peer runs a
     // vortexia that reads them.
     const encrypt = /^(1|true|yes)$/i.test(process.env.VORTEXIA_NOSTR_ENCRYPT || '');
-    nostrRelay = new NostrRelay({ secretKey: Buffer.from(nostrSecretHex, 'hex'), friends: openFriendsStore(), encrypt, envName });
+    nostrRelay = new NostrRelay({ secretKey: Buffer.from(nostrSecretHex, 'hex'), friends: openFriendsStore(), encrypt, envName, relays: nostrRelaysFromEnv() });
     transports.push(nostrRelay);
   }
   if (gistId) transports.push(new GistRelay({ gistId, token: process.env.VORTEXIA_GIST_TOKEN }));
   const relay = transports.length > 1 ? new MultiRelay(transports) : transports[0];
   if (nostrRelay) {
     logger.info(`[vortexia] Nostr identity pubkey (share this for peers to trust ${envName}): ${await nostrRelay.publicKeyHex()}`);
+    logger.info(`[vortexia] Nostr relays: ${nostrRelay.relayUrls.join(', ')}`);
     logger.info(`[vortexia] Nostr writes are ${nostrRelay.encrypt ? 'NIP-44 encrypted' : 'PLAINTEXT (set VORTEXIA_NOSTR_ENCRYPT=1 once every peer reads encrypted)'}; reads accept both`);
   }
   // The gateway is the one consumer of `<env>-gateway`'s inbox: connect
