@@ -73,7 +73,9 @@ export class VortexRelayBridge {
    * are kept across restarts — see _pollOnce. Without it the seen-set lives
    * in memory only (tests).
    */
-  constructor({ envName, relay, directory = [], envNames, matchOpts = {}, transportPins = {}, seenFile = null }) {
+  constructor({ envName, relay, directory = [], envNames, matchOpts = {}, transportPins = {}, seenFile = null, directCredentialsFor = null }) {
+    // Signs this environment in to a LAN peer's broker (auth.js); null = no credentials.
+    this.directCredentialsFor = directCredentialsFor;
     this.envName = envName;
     this.relay = relay;
     this.directory = directory;
@@ -153,7 +155,11 @@ export class VortexRelayBridge {
       onUp: (peer) => {
         this.attachDirectTransport(
           peer.envName,
-          new DirectMqttTransport({ envName: peer.envName, host: peer.host, mqttPort: peer.mqttPort, ...(ClientImpl ? { ClientImpl } : {}) }),
+          new DirectMqttTransport({
+            envName: peer.envName, host: peer.host, mqttPort: peer.mqttPort,
+            ...(ClientImpl ? { ClientImpl } : {}),
+            ...(this.directCredentialsFor ? { credentialsFor: this.directCredentialsFor } : {}),
+          }),
         ).then(
           () => console.log(`[vortex-relay:${this.envName}] LAN direct connection to ${peer.envName} established (${peer.host}:${peer.mqttPort})`),
           (err) => console.error(`[vortex-relay:${this.envName}] direct transport to ${peer.envName} failed to connect:`, err),

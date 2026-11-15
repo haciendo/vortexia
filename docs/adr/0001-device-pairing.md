@@ -162,17 +162,23 @@ sig   schnorr over the event id
 
 ### 5. Broker authentication (needed for both LAN and devices)
 
-- Add an aedes `authenticate` hook. A non-loopback connection must send
-  `username = <pubkey hex>` and `password = <signed auth event>` (NIP-42-style:
-  kind 22242, `created_at` within ±60 s, a `challenge` tag set to the broker's
-  `envName`). The pubkey must be a non-revoked friend.
-- `authorizePublish` / `authorizeSubscribe`: a **device** may only subscribe to
-  its own mailbox topics and publish 7879 envelopes addressed to this env. An
-  **env** keeps today's relay topics.
+- Add an aedes `authenticate` hook (`src/auth.js`). A non-loopback connection
+  must send `username = <pubkey hex>` and `password = <signed auth event>`
+  (NIP-42-style: kind 22242, `created_at` within ±120 s, a `challenge` tag set
+  to the broker's `envName`). The pubkey must belong to an active friend of
+  role **env**, and each auth event is accepted only once: plain TCP can be
+  sniffed, so the event can't be replayed within the window. The LAN direct
+  transport signs a fresh event on every connect.
+- **Devices do not use MQTT.** Their direct path is the HTTP gateway (§9), so
+  a device key gets rejected on the broker.
+- `vortexia/*` topics (control, paths) are loopback-only for publishing and
+  subscribing.
 - Loopback (local agents, LAS backend, widget) stays unauthenticated, as it is
   today.
-- Bind policy: keep listening on all interfaces (LAN direct needs it), but
-  reject unauthenticated non-loopback clients from day one.
+- Bind policy: keep listening on all interfaces (LAN direct needs it).
+- **Rollout without a flag day:** `VORTEXIA_BROKER_AUTH=warn` (the default)
+  logs what would be rejected and lets it in. Once every peer runs a vortexia
+  that signs in, set `enforce`. `off` disables the check.
 
 ### 6. Audio does not travel through the relay — only the notice
 

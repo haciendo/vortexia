@@ -53,10 +53,14 @@ async function resolvePort(explicitPort) {
 }
 
 export class VortexiaClient extends EventEmitter {
-  constructor({ host = 'localhost', port } = {}) {
+  constructor({ host = 'localhost', port, credentials = null } = {}) {
     super();
     this.host = host;
     this.port = port;
+    // Optional async () => ({username, password}), called on every
+    // register() — a remote broker wants a fresh signed auth event each
+    // connect (auth.js, ADR 0001 §5). Loopback brokers ask for nothing.
+    this.credentials = credentials;
     this.name = null;
     this.mqttClient = null;
     this.mailbox = false;
@@ -97,10 +101,12 @@ export class VortexiaClient extends EventEmitter {
     this.presence = presence;
     const resolvedPort = await resolvePort(this.port);
     const url = `mqtt://${this.host}:${resolvedPort}`;
+    const creds = this.credentials ? await this.credentials() : null;
 
     this.mqttClient = mqtt.connect(url, {
       clientId: mailbox ? mailboxClientId(name) : `vortexia-${name}-${Math.random().toString(16).slice(2)}`,
       clean: !mailbox,
+      ...(creds ? { username: creds.username, password: creds.password } : {}),
       // Keep this a simple, explicit client: no background auto-reconnect
       // loop. Callers that want reconnection should call register() again.
       reconnectPeriod: 0,

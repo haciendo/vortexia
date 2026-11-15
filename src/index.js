@@ -14,6 +14,7 @@ import { discoverLocalRoster } from './vortex-relay/localRoster.js';
 import { LanDiscovery } from './vortex-relay/lanDiscovery.js';
 import { FriendsStore, parsePeersEnv, FRIENDS_TOPIC } from './vortex-relay/friends.js';
 import { startFriendsControl } from './vortex-relay/control.js';
+import { BrokerAuthenticator, buildBrokerCredentials } from './auth.js';
 
 function openFriendsStore() {
   return new FriendsStore({ file: path.join(defaultDataDir(), 'friends.json'), seed: parsePeersEnv(process.env.VORTEXIA_NOSTR_PEERS || '') });
@@ -196,7 +197,9 @@ async function startVortexRelay(mqttPort, wsPort) {
   });
   const stopGateway = async () => { gatewayStopping = true; clearTimeout(gatewayTimer); await gateway.close(); };
 
-  const bridge = new VortexRelayBridge({ envName, relay, envNames, seenFile: path.join(defaultDataDir(), `relay-seen-${envName}.json`) }).attach(gateway);
+  // Sign in to LAN peers' brokers as their friend (ADR 0001 §5) — needs our Nostr key.
+  const directCredentialsFor = nostrSecretHex ? (peerEnv) => buildBrokerCredentials(Buffer.from(nostrSecretHex, 'hex'), peerEnv) : null;
+  const bridge = new VortexRelayBridge({ envName, relay, envNames, seenFile: path.join(defaultDataDir(), `relay-seen-${envName}.json`), directCredentialsFor }).attach(gateway);
   // Re-read on every publish tick (see startDirectorySync): the LAS backend
   // may come up after vortexia, and agents register late. A failed read
   // returns [] — keep the last non-empty roster rather than publishing an
@@ -229,7 +232,11 @@ async function cmdStart() {
     return;
   }
 
-  const { mqttPort, wsPort, close } = await startBroker();
+  // Non-loopback clients must be friends (ADR 0001 §5); VORTEXIA_BROKER_AUTH
+  // = warn (default: log, let in) | enforce | off.
+  const authenticator = new BrokerAuthenticator({ envName: process.env.VORTEXIA_ENV_NAME || null, friends: openFriendsStore(), logger });
+  logger.info(`[vortexia] broker auth for non-loopback clients: ${authenticator.mode}`);
+  const { mqttPort, wsPort, close } = await startBroker({ authenticator });
 
   fs.writeFileSync(PID_FILE, String(process.pid));
   fs.writeFileSync(PORT_FILE, JSON.stringify({ mqttPort, wsPort, pid: process.pid }, null, 2));

@@ -269,6 +269,13 @@ changes apply without a restart. A key-free view is retained on
   else that isn't a browser/Electron renderer.
 - WebSocket MQTT listener: for an Electron renderer connecting directly
   with `mqtt.js`, no native dependencies required.
+- **Loopback clients connect with no credentials.** A client from any other
+  address (a LAN peer's vortex-relay) signs in as a friend: `username` = its
+  pubkey hex, `password` = the JSON of a signed kind-22242 event with
+  `["challenge", <this broker's envName>]`, `created_at` within ±120 s, each
+  event used once. `VORTEXIA_BROKER_AUTH` = `warn` (default: log, let in) |
+  `enforce` | `off`. Non-loopback clients can't use `vortexia/*` topics when it
+  is `enforce` (docs/adr/0001-device-pairing.md §5).
 
 Both ports are stable across restarts: the broker re-binds whatever it
 bound last time (`data/ports.json`), or an explicit `VORTEXIA_MQTT_PORT` /

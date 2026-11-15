@@ -36,7 +36,7 @@ export class DirectMqttTransport {
   name = 'lan-direct';
 
   constructor({
-    envName, host, mqttPort, ClientImpl = VortexiaClient,
+    envName, host, mqttPort, ClientImpl = VortexiaClient, credentialsFor = null,
     reconnectBaseMs = DEFAULT_RECONNECT_BASE_MS, reconnectMaxMs = DEFAULT_RECONNECT_MAX_MS,
   }) {
     if (!envName || !host || !mqttPort) throw new Error('DirectMqttTransport requires envName, host, and mqttPort');
@@ -44,6 +44,9 @@ export class DirectMqttTransport {
     this.host = host;
     this.mqttPort = mqttPort;
     this._ClientImpl = ClientImpl;
+    // (envName) => Promise<{username, password}>: signs in to the peer's
+    // broker as this environment's friend (auth.js).
+    this._credentialsFor = credentialsFor;
     this._reconnectBaseMs = reconnectBaseMs;
     this._reconnectMaxMs = reconnectMaxMs;
     this._reconnectAttempts = 0;
@@ -60,7 +63,11 @@ export class DirectMqttTransport {
   async connect() {
     if (this.connected) return;
     this._deliberatelyClosed = false;
-    this.client = new this._ClientImpl({ host: this.host, port: this.mqttPort });
+    this.client = new this._ClientImpl({
+      host: this.host,
+      port: this.mqttPort,
+      ...(this._credentialsFor ? { credentials: () => this._credentialsFor(this.envName) } : {}),
+    });
     // A bridge-only client identity, not a real agent — no inbox worth
     // draining, so its own name is just diagnostic (visible to the peer
     // broker's other subscribers as "who published this").

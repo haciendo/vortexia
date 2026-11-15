@@ -63,6 +63,7 @@ export async function startBroker({
   dataDir = defaultDataDir(),
   persist = true,
   mailbox = {},
+  authenticator = null,
 } = {}) {
   const persistence = new MailboxPersistence({
     file: persist ? path.join(dataDir, 'mailboxes.json') : null,
@@ -72,12 +73,24 @@ export async function startBroker({
 
   const aedes = new Aedes({
     persistence,
+    // Non-loopback clients prove they are a friend (auth.js, ADR 0001 §5).
+    // No authenticator: everyone is let in, as before (tests, single-Mac).
+    ...(authenticator ? { authenticate: authenticator.hook() } : {}),
+    authorizeSubscribe(client, sub, cb) {
+      if (authenticator && sub.topic.startsWith('vortexia/control/') && !authenticator.allowsControl(client)) {
+        return cb(new Error('control topics are loopback-only'));
+      }
+      cb(null, sub);
+    },
     // A mailbox comes into existence on the first publish to an inbox —
     // BEFORE aedes computes who to enqueue for, which is why this lives in
     // authorizePublish rather than in a 'publish' listener (that fires
     // after the enqueue decision, too late for the very first message).
     authorizePublish(client, packet, cb) {
       if (packet.topic.startsWith('$SYS')) return cb(new Error('$SYS topic is reserved'));
+      if (authenticator && packet.topic.startsWith('vortexia/') && !authenticator.allowsControl(client)) {
+        return cb(new Error('vortexia/* topics are loopback-only'));
+      }
       const agentName = parseInboxTopic(packet.topic);
       if (!agentName) return cb(null);
       persistence.ensureMailbox(agentName, (err, created) => {
