@@ -2,6 +2,7 @@
 // pairs by QR token, the human accepts, and then it sends to an agent, reads
 // LAS through the proxy, uploads a clip and drains its outbox. Every body is
 // signed and encrypted.
+import './helpers/isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';

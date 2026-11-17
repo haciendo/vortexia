@@ -1,3 +1,4 @@
+import './helpers/isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startBroker } from '../src/broker.js';

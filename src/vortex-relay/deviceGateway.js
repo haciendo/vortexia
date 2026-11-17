@@ -105,6 +105,8 @@ export class DeviceGateway {
     this._seenAuth = new Map();
     this._consumers = new Map(); // device envName → VortexiaClient (mailbox consumer)
     this.client = null;
+    /** (deviceEnvName, messagePayload) → void: set by the relay link to push outbox items live. */
+    this.onOutbox = null;
   }
 
   async start() {
@@ -315,8 +317,15 @@ export class DeviceGateway {
     if (!HEX64.test(meta?.sha256 || '')) throw new HttpError(400, 'blob needs sha256');
     if (!meta.target?.agent) throw new HttpError(400, 'blob needs target.agent (there is no general mic)');
     if (!device.dev && Buffer.from(String(meta.key || ''), 'base64').length !== 32) throw new HttpError(400, 'blob key must be 32 bytes, base64');
+    const { data, ...rest } = meta;
+    // The relay path carries the encrypted bytes inline (base64), with no PUT.
+    if (typeof data === 'string' && data && !this._findFinal(device.envName, meta.sha256)) {
+      const body = Buffer.from(data, 'base64');
+      if (body.length > MAX_BLOB_BYTES) throw new HttpError(413, 'clip too large');
+      writeAtomic(path.join(this._incoming(device.envName), `${meta.sha256}.bin`), body, 0o600);
+    }
     const file = path.join(this._incoming(device.envName), `${meta.sha256}.key.json`);
-    writeAtomic(file, JSON.stringify(meta), 0o600);
+    writeAtomic(file, JSON.stringify(rest), 0o600);
     const delivered = await this._tryFinalize(device, meta.sha256);
     return { ok: true, type: 'blob', sha256: meta.sha256, delivered };
   }
@@ -414,6 +423,7 @@ export class DeviceGateway {
       if (box.items.length > 500) box.items = box.items.slice(-500);
       fs.mkdirSync(this.outboxDir, { recursive: true });
       writeAtomic(this._outboxFile(envName), JSON.stringify(box), 0o600);
+      try { this.onOutbox?.(envName, this.outboxPayload(box.items.at(-1))); } catch (err) { this.logger.warn?.(`[vortexia] device gateway: onOutbox: ${err.message}`); }
     });
     c.on('close', () => { this._consumers.delete(envName); });
     try {
@@ -424,19 +434,27 @@ export class DeviceGateway {
     }
   }
 
-  async _getOutbox(res, device, url) {
-    const ack = Number(url.searchParams.get('ack'));
-    const box = this._readOutbox(device.envName);
+  /** Drop outbox items up to `ack` (when it is a positive number); returns what is left. */
+  ackOutbox(envName, ack) {
+    const box = this._readOutbox(envName);
     if (Number.isFinite(ack) && ack > 0) {
       box.items = box.items.filter((i) => i.seq > ack);
       fs.mkdirSync(this.outboxDir, { recursive: true });
-      writeAtomic(this._outboxFile(device.envName), JSON.stringify(box), 0o600);
+      writeAtomic(this._outboxFile(envName), JSON.stringify(box), 0o600);
     }
+    return box;
+  }
+
+  /** The `message` payload a device receives for one outbox item (same on HTTP and relay). */
+  outboxPayload(item) {
+    const { from, text, ts, id, kind, source } = item.envelope;
+    return { type: 'message', seq: item.seq, id, from, text, ts, kind: kind || 'message', source };
+  }
+
+  async _getOutbox(res, device, url) {
+    const box = this.ackOutbox(device.envName, Number(url.searchParams.get('ack')));
     const events = [];
-    for (const i of box.items) {
-      const { from, text, ts, id, kind, source } = i.envelope;
-      events.push(await this._seal(device, { type: 'message', seq: i.seq, id, from, text, ts, kind: kind || 'message', source }));
-    }
+    for (const i of box.items) events.push(await this._seal(device, this.outboxPayload(i)));
     return this._json(res, 200, { cursor: box.seq, events });
   }
 }

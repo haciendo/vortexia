@@ -16,6 +16,7 @@ import { FriendsStore, parsePeersEnv, FRIENDS_TOPIC } from './vortex-relay/frien
 import { startFriendsControl } from './vortex-relay/control.js';
 import { PairingManager } from './vortex-relay/pairing.js';
 import { DeviceGateway } from './vortex-relay/deviceGateway.js';
+import { DeviceRelayLink } from './vortex-relay/deviceRelay.js';
 import os from 'node:os';
 
 // Where a paired device can reach this env directly: private IPv4s (LAN) and
@@ -257,6 +258,16 @@ async function startVortexRelay(mqttPort, wsPort, wsServer = null) {
     }
   }
   startFriendsControl({ mqttPort, store: friendsStore, pairing, onChange: friendsPublisher.refresh, logger });
+  // The phone away from home, with no LAN or Tailscale path (ADR 0001 §9.1).
+  // Started after the friends control so it wraps pairing.onEvent last.
+  if (deviceGateway && !/^(0|false|no|off)$/i.test(process.env.VORTEXIA_DEVICE_RELAY || '')) {
+    const relays = nostrRelay ? nostrRelay.relayUrls : nostrRelaysFromEnv();
+    await new DeviceRelayLink({
+      gateway: deviceGateway, pairing, friends: friendsStore,
+      secretKey: Buffer.from(nostrSecretHex, 'hex'), relays,
+      stateFile: path.join(defaultDataDir(), 'device-relay-state.json'), logger,
+    }).start();
+  }
 
   logger.info(`[vortexia] vortex-relay enabled: env=${envName}, envNames=[${envNames.join(', ')}], local roster=${roster.length} agent(s)`);
   return { bridge, gateway, stopGateway, lan };

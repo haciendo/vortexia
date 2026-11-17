@@ -201,11 +201,12 @@ store-and-forward log on volunteer relays is the wrong place for bulk data.
   deterministic consumer, not an agent session; see "What LAS has to do"):
   `{type: "device-audio", from: "jose-iphone", path, sha256, durationMs, capturedAt}`.
   LAS transcribes it from the local path.
-- **Away from home without Tailscale** the clip waits in the phone's queue, and
-  only the notice ("3 clips pending") reaches the Mac through the relay. If
-  uploading away from home without Tailscale becomes a requirement, a later
-  step can add an encrypted Blossom (Nostr blob server) upload. The encryption
-  is already end-to-end, so that would only add a transport, not a redesign.
+- **Away from home without Tailscale** (amended 2026-11-17, see §9.1): a
+  clip can travel through the relay after all, inline in the `blob` message
+  (`data` = base64 of the encrypted body) and split into `part` events. This
+  is meant for short dictations (seconds to a couple of minutes). Big clips
+  should still wait for a direct path, because relays rate-limit bursts. The
+  phone decides: direct path if there is one, relay otherwise.
 
 ### 7. Transports for a device, in cost order
 
@@ -216,8 +217,9 @@ store-and-forward log on volunteer relays is the wrong place for bulk data.
    an identity or a dependency: the keys and the auth are ours, and Tailscale
    only provides reachability. That keeps it optional, and keeps it working on
    Windows.
-3. **Nostr relay** — always available, for control messages and notices
-   (panel, agents directory, "clip pending", replies). Never for blobs.
+3. **Nostr relay** — always available. It carries the whole device
+   conversation (§9.1): sends, panel reads, replies, the outbox and short
+   clips.
 
 The phone keeps no live connection in the background (iOS doesn't allow it
 anyway). It syncs on foreground and on background fetch. If push is wanted
@@ -338,6 +340,54 @@ go over Nostr when there is no direct path.
   build only: the home logs a warning on every request, and it only accepts
   requests from loopback or private-range source addresses (RFC 1918,
   Tailscale's 100.64/10).
+
+### 9.1 The same conversation over a Nostr relay (away from home)
+
+When the phone has no direct path, it talks to its home through the relays
+from the QR / `PAIR_ACK` (`r=`). This is implemented in
+`src/vortex-relay/deviceRelay.js` and is on by default
+(`VORTEXIA_DEVICE_RELAY=0` turns it off).
+
+- **Events.** Each one is kind 7879, NIP-44 encrypted to the recipient,
+  `["p", <recipient pubkey>]`.
+  - The phone publishes to the home pubkey and subscribes to
+    `{kinds:[7879], "#p":[devicePk], authors:[homePk], since}`.
+  - Home subscribes to `{kinds:[7879], "#p":[homePk]}`. It only answers
+    active device friends, plus `PAIR_REQUEST` for a waiting token.
+    Strangers get silence.
+- **Payloads, phone → home.** These are the same as `POST /device/events`:
+  - `send`, `http`, `PAIR_REQUEST`;
+  - `blob`, which may carry `data`, base64 of the AES-GCM body (§6);
+  - `{type:"sync", ack?}`, which drops outbox items with seq ≤ ack and
+    resends the rest.
+- **Payloads, home → phone.** Every incoming event gets exactly one answer,
+  carrying `ref` = the event id, or the `msgId` of a split payload:
+  - `{type:"ack", ref, ok, …}` for `send`, `{…, delivered}` for `blob`;
+  - `{type:"http-response", ref, id, status, headers, body}`;
+  - `{type:"error", ref, status, error}`;
+  - `{type:"pair-pending", ref, sessionId}`, followed later by the
+    `PAIR_ACK` / `PAIR_REJECT` event itself;
+  - `{type:"synced", ref, cursor}`.
+
+  On top of that, **every outbox message is pushed live** as
+  `{type:"message", seq, id, from, text, ts, kind, source}`. That is the same
+  payload as `GET /device/events`, so the phone dedupes by `seq` across both
+  paths.
+- **Splitting.** A payload whose JSON is over 32 000 bytes travels as
+  `{type:"part", msgId, index, total, data}`, where `data` is a slice of the
+  base64 of the UTF-8 JSON. The cap is 400 parts. This works both ways: the
+  receiver joins the parts and handles the result as one payload. The phone
+  must also join parts, because a large panel read comes back split.
+- **Reliability.** Home:
+  - remembers every handled event id (`data/device-relay-state.json`), so a
+    relay resending, a catch-up query or a restart never processes anything
+    twice;
+  - reconnects and resumes the subscription;
+  - runs a catch-up query every minute;
+  - retries a publish no relay accepted (2 s, 10 s, 1 min, 5 min).
+
+  Events older than 7 days are ignored. The phone should do the same: dedupe
+  by event id, resend if no `ref` answer arrives, and `sync` on foreground.
 
 ### 10. Pairing and friends control over MQTT (for the LAS UI)
 

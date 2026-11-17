@@ -1,4 +1,5 @@
 // Friends control over MQTT (ADR 0001 §10): revoke/rename by request/response.
+import './helpers/isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
